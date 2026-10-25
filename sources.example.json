@@ -1,0 +1,10 @@
+{
+  "scan_interval_minutes": 360,
+  "max_pages_per_source": 30,
+  "request_timeout_seconds": 20,
+  "user_agent": "BuscaVagasBot/0.1 (+contact: admin@seudominio.com; respectful public job listing indexing)",
+  "greenhouse_boards": [],
+  "lever_sites": [],
+  "jsonld_seed_urls": [],
+  "sitemap_urls": []
+}
