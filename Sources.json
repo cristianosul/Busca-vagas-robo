@@ -1,7 +1,10 @@
 
 {
-  "greenhouse": [],
-  "lever": [],
-  "jsonld_urls": [],
+  "scan_interval_minutes": 360,
+  "max_pages_per_source": 30,
+  "request_timeout_seconds": 20,
+  "greenhouse_boards": [],
+  "lever_sites": [],
+  "jsonld_seed_urls": [],
   "sitemap_urls": []
 }
