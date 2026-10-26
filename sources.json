@@ -9,5 +9,10 @@
   "lever_sites": [],
   "jsonld_seed_urls": [],
   "sitemap_urls": [],
-  "additional_sources": []
-}
+  
+"additional_sources": [
+  {
+    "url": "https://cacaushow-industria.gupy.io/job/eyJqb2JJZCI6MTI3NzkxNTQsInNvdXJjZSI6Imd1cHlfcG9ydGFsIn0=?jobBoardSource=gupy_portal",
+    "name": "Gupy - Cacau Show"
+  }
+]
