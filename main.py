@@ -61,8 +61,7 @@ def clean(value: Any) -> str:
 
 
 def job_id(url: str) -> str:
-    return hashlib.sha256(url.split('?')[0].rstrip('/').encode()).hexdigest()[:24]
-
+    return hashlib.sha256(url.encode()).hexdigest()[:24]
 
 def location_text(value: Any) -> str:
     if isinstance(value, list): return '; '.join(filter(None, (location_text(x) for x in value)))
