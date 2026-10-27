@@ -680,4 +680,94 @@ def health():
     return {
         "status": "ok",
         "active_jobs": count,
-        "last_crawl": dict(last) if last els
+        "last_crawl": dict(last) if last else None,
+    }
+
+
+@app.get("/api/jobs")
+def jobs(
+    q: str = "",
+    location: str = "",
+    mode: str = "",
+    state: str = "",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    terms, args = ["active=1"], []
+
+    if q.strip():
+        terms.append(
+            "(title LIKE ? OR company LIKE ? OR description LIKE ?)"
+        )
+        like = "%" + q.strip() + "%"
+        args.extend([like, like, like])
+
+    if location.strip():
+        terms.append("location LIKE ?")
+        args.append("%" + location.strip() + "%")
+
+    if mode.strip() and mode != "Todas":
+        terms.append("mode=?")
+        args.append(mode)
+
+    if state.strip():
+        terms.append("location LIKE ?")
+        args.append("%" + state.strip() + "%")
+
+    where = " AND ".join(terms)
+
+    with db() as con:
+        total = con.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE {where}", args
+        ).fetchone()[0]
+
+        rows = con.execute(f"""
+            SELECT id, title, company, location, mode,
+                   employment_type, salary, description, url,
+                   source, date_posted, valid_through, first_seen
+            FROM jobs
+            WHERE {where}
+            ORDER BY COALESCE(date_posted, first_seen) DESC
+            LIMIT ? OFFSET ?
+        """, args + [limit, offset]).fetchall()
+
+    return {
+        "total": total,
+        "items": [dict(row) for row in rows],
+    }
+
+
+@app.get("/api/stats")
+def stats():
+    with db() as con:
+        total = con.execute(
+            "SELECT COUNT(*) FROM jobs WHERE active=1"
+        ).fetchone()[0]
+
+        sources = con.execute(
+            "SELECT COUNT(DISTINCT source) FROM jobs WHERE active=1"
+        ).fetchone()[0]
+
+        last = con.execute("""
+            SELECT finished_at, jobs_seen, jobs_added,
+                   sources_checked, errors
+            FROM crawl_runs
+            ORDER BY id DESC LIMIT 1
+        """).fetchone()
+
+    return {
+        "active_jobs": total,
+        "sources": sources,
+        "last_crawl": dict(last) if last else None,
+    }
+
+
+@app.post("/api/admin/crawl")
+async def manual_crawl(x_crawl_token: str = Header(default="")):
+    if ADMIN_TOKEN and x_crawl_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    return await run_crawl()
+
+
+app.mount("/static", StaticFiles(directory=BASE), name="static")
