@@ -7,8 +7,9 @@
     "mongodb"
   ],
   "lever_sites": [
-  "jobgether"
-],
+    "jobgether"
+  ],
+  "ashby_boards": [],
   "jsonld_seed_urls": [],
   "sitemap_urls": [],
   "additional_sources": [
