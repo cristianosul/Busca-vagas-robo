@@ -348,7 +348,51 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
 
     return total, added
 
+async def ashby(client, slug: str) -> tuple[int, int]:
+    data = await fetch_json(
+        client,
+        f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+    )
 
+    if not isinstance(data, dict):
+        return 0, 0
+
+    added = total = 0
+
+    for item in data.get("jobs", []):
+        if item.get("isListed") is False:
+            continue
+
+        title = clean(item.get("title"))
+        url = clean(item.get("jobUrl") or item.get("applyUrl"))
+
+        if not title or not url:
+            continue
+
+        loc = clean(item.get("location"))
+        workplace = clean(item.get("workplaceType"))
+        desc = clean(
+            item.get("descriptionPlain")
+            or item.get("descriptionHtml")
+        )
+
+        total += 1
+        added += upsert({
+            "title": title,
+            "company": slug,
+            "location": loc,
+            "mode": infer_mode(loc + " " + workplace),
+            "employment_type": clean(item.get("employmentType")),
+            "salary": "",
+            "description": desc,
+            "url": url,
+            "source": "Ashby",
+            "date_posted": clean(item.get("publishedAt")),
+            "valid_through": "",
+        })
+
+    return total, added
+    
 async def lever(client, slug: str) -> tuple[int, int]:
     data = await fetch_json(
         client,
