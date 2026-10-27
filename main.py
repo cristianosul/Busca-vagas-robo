@@ -466,7 +466,70 @@ async def crawl_sitemap(
     except Exception:
         return 0, 0
 
+async def gupy(client, keyword: str, limit: int = 50) -> tuple[int, int]:
+    base_url = "https://portal.gupy.io/api/job-search/jobs"
+    total = added = 0
 
+    try:
+        response = await client.get(
+            base_url,
+            params={
+                "jobName": keyword,
+                "limit": limit,
+                "offset": 0,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, dict):
+            return 0, 0
+
+        for item in data.get("data", []):
+            title = clean(item.get("name"))
+            url = clean(item.get("jobUrl"))
+
+            if not title or not url:
+                continue
+
+            company = clean(item.get("careerPageName")) or "Empresa"
+            city = clean(item.get("city"))
+            state = clean(item.get("state"))
+            location = ", ".join(x for x in [city, state] if x)
+
+            description = BeautifulSoup(
+                clean(item.get("description")),
+                "html.parser",
+            ).get_text(" ", strip=True)
+
+            workplace = clean(item.get("workplaceType")).lower()
+            if workplace == "on-site":
+                mode = "Presencial"
+            elif workplace == "hybrid":
+                mode = "Híbrido"
+            elif workplace == "remote":
+                mode = "Remoto"
+            else:
+                mode = infer_mode(location + " " + description)
+
+            total += 1
+            added += upsert({
+                "title": title,
+                "company": company,
+                "location": location,
+                "mode": mode,
+                "description": description,
+                "url": url,
+                "source": "Gupy",
+                "date_posted": clean(item.get("publishedDate")),
+                "valid_through": clean(item.get("applicationDeadline")),
+            })
+
+    except Exception as e:
+        raise RuntimeError(f"Gupy ({keyword}): {str(e)[:150]}") from e
+
+    return total, added
+    
 async def run_crawl() -> dict:
     cfg = config()
 
@@ -541,6 +604,22 @@ async def run_crawl() -> dict:
                     f"Ashby {slug}: {str(e)[:180]}"
                 )
 
+        for keyword in [
+            "auxiliar",
+            "analista",
+            "vendedor",
+            "operador",
+            "estágio",
+        ]:
+            try:
+                t, a = await gupy(client, keyword, 50)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(str(e)[:180])
+        
         for url in cfg.get("jsonld_seed_urls", []):
             try:
                 t, a = await crawl_page(client, url, "Página pública")
