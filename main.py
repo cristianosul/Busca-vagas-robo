@@ -782,7 +782,7 @@ def jobs(
         args.extend([like, like, like])
 
     if location.strip().lower() in ("brasil", "brazil"):
-    brazil_patterns = [
+        brazil_patterns = [
         "%Brasil%", "%Brazil%",
         "%São Paulo%", "%Rio de Janeiro%",
         "%Belo Horizonte%", "%Brasília%",
