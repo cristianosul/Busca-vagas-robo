@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "user_agent": "BuscaVagasBot/0.1 (+respectful job listing indexing)",
     "greenhouse_boards": [],
     "lever_sites": [],
+    "ashby_boards": [],
     "jsonld_seed_urls": [],
     "sitemap_urls": [],
     "additional_sources": [],
