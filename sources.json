@@ -6,7 +6,9 @@
   "greenhouse_boards": [
     "mongodb"
   ],
-  "lever_sites": [],
+  "lever_sites": [
+  "jobgether"
+],
   "jsonld_seed_urls": [],
   "sitemap_urls": [],
   "additional_sources": [
