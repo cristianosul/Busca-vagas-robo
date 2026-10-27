@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +6,6 @@ import json
 import os
 import re
 import sqlite3
-
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +17,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
 
 load_dotenv()
 
@@ -46,10 +43,10 @@ def config() -> dict:
     if CONFIG_PATH.exists():
         try:
             saved = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            return {**DEFAULT_CONFIG, **saved}
-        except Exception:
+            if isinstance(saved, dict):
+                return {**DEFAULT_CONFIG, **saved}
+        except (OSError, json.JSONDecodeError):
             pass
-
     return DEFAULT_CONFIG.copy()
 
 
@@ -80,22 +77,26 @@ def init_db():
                 active INTEGER NOT NULL DEFAULT 1
             )
         """)
-
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs(title)"
-        )
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_active ON jobs(active)"
-        )
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs(title)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_active ON jobs(active)")
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS crawl_runs (
+                id INTEGER PRIMARY KEY,
+                started_at TEXT,
+                finished_at TEXT,
+                sources_checked INTEGER,
+                jobs_seen INTEGER,
+                jobs_added INTEGER,
+                errors TEXT
+            )
+        """)
 
 
 def clean(value: Any) -> str:
     if value is None:
         return ""
-
     if isinstance(value, (dict, list)):
         return " ".join(str(x) for x in value)[:4000]
-
     return re.sub(r"\s+", " ", str(value)).strip()[:4000]
 
 
@@ -105,19 +106,14 @@ def job_id(url: str) -> str:
 
 def location_text(value: Any) -> str:
     if isinstance(value, list):
-        return "; ".join(
-            filter(None, (location_text(x) for x in value))
-        )
-
+        return "; ".join(filter(None, (location_text(x) for x in value)))
     if not isinstance(value, dict):
         return clean(value)
 
     address = value.get("address", value)
 
     if isinstance(address, list):
-        return "; ".join(
-            filter(None, (location_text(x) for x in address))
-        )
+        return "; ".join(filter(None, (location_text(x) for x in address)))
 
     if not isinstance(address, dict):
         return clean(address)
@@ -127,67 +123,46 @@ def location_text(value: Any) -> str:
         address.get("addressRegion"),
         address.get("addressCountry"),
     ]
-
-    return ", ".join(clean(p) for p in parts if p)
+    return ", ".join(clean(x) for x in parts if x)
 
 
 def infer_mode(text: str, job: dict | None = None) -> str:
-    t = (
-        text + " " + clean((job or {}).get("jobLocationType"))
-    ).lower()
+    t = (text + " " + clean((job or {}).get("jobLocationType"))).lower()
 
-    if any(x in t for x in (
-        "telecommute", "remote", "remoto", "home office"
-    )):
+    if any(x in t for x in ("telecommute", "remote", "remoto", "home office")):
         return "Remoto"
-
-    if any(x in t for x in (
-        "hybrid", "híbrido", "hibrido"
-    )):
+    if any(x in t for x in ("hybrid", "híbrido", "hibrido")):
         return "Híbrido"
-
-    if any(x in t for x in (
-        "onsite", "on-site", "presencial"
-    )):
+    if any(x in t for x in ("onsite", "on-site", "presencial")):
         return "Presencial"
 
     return "Não informado"
 
 
-def extract_jobposting(
-    obj: Any,
-    page_url: str,
-    source: str
-) -> list[dict]:
-    out = []
+def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
+    found = []
 
     if isinstance(obj, list):
         for item in obj:
-            out.extend(
-                extract_jobposting(item, page_url, source)
-            )
+            found.extend(extract_jobposting(item, page_url, source))
 
     elif isinstance(obj, dict):
-        typ = obj.get("@type", [])
+        types = obj.get("@type", [])
 
-        if isinstance(typ, str):
-            typ = [typ]
+        if isinstance(types, str):
+            types = [types]
 
-        if "JobPosting" in typ:
+        if "JobPosting" in types:
             url = clean(obj.get("url")) or page_url
             title = clean(obj.get("title"))
 
             if title and url.startswith(("http://", "https://")):
-                loc = (
-                    location_text(obj.get("jobLocation"))
-                    or location_text(
-                        obj.get("applicantLocationRequirements")
-                    )
+                loc = location_text(obj.get("jobLocation")) or location_text(
+                    obj.get("applicantLocationRequirements")
                 )
 
                 desc = BeautifulSoup(
-                    clean(obj.get("description")),
-                    "html.parser"
+                    clean(obj.get("description")), "html.parser"
                 ).get_text(" ", strip=True)
 
                 org = obj.get("hiringOrganization") or {}
@@ -199,29 +174,26 @@ def extract_jobposting(
                 salary_text = ""
 
                 if isinstance(salary, dict):
-                    val = salary.get("value", {})
+                    value = salary.get("value", {})
 
-                    if isinstance(val, dict):
+                    if isinstance(value, dict):
                         salary_text = clean(
-                            val.get("value")
-                            or val.get("minValue")
+                            value.get("value") or value.get("minValue")
                         )
                     else:
-                        salary_text = clean(val)
+                        salary_text = clean(value)
 
                     currency = clean(salary.get("currency"))
 
                     if salary_text and currency:
                         salary_text += " " + currency
 
-                out.append({
+                found.append({
                     "title": title,
                     "company": clean(org.get("name")),
                     "location": loc,
                     "mode": infer_mode(loc + " " + desc, obj),
-                    "employment_type": clean(
-                        obj.get("employmentType")
-                    ),
+                    "employment_type": clean(obj.get("employmentType")),
                     "salary": salary_text,
                     "description": desc,
                     "url": url,
@@ -231,38 +203,34 @@ def extract_jobposting(
                 })
 
         for key, value in obj.items():
-            if key in (
-                "@graph",
-                "mainEntity",
-                "itemListElement",
-                "hasPart",
-            ) or isinstance(value, (dict, list)):
-                out.extend(
-                    extract_jobposting(value, page_url, source)
-                )
+            if (
+                key in ("@graph", "mainEntity", "itemListElement", "hasPart")
+                or isinstance(value, (dict, list))
+            ):
+                found.extend(extract_jobposting(value, page_url, source))
 
-    return out
+    return found
 
 
 def upsert(job: dict) -> bool:
-    url = job["url"].split("#")[0]
+    url = clean(job.get("url")).split("#")[0]
+
+    if not url.startswith(("http://", "https://")) or not clean(job.get("title")):
+        return False
+
     now = datetime.now(timezone.utc).isoformat()
-    ident = job_id(url)
 
     with db() as con:
         old = con.execute(
-            "SELECT id FROM jobs WHERE url = ?",
-            (url,)
+            "SELECT id FROM jobs WHERE url=?", (url,)
         ).fetchone()
 
         con.execute("""
             INSERT INTO jobs (
-                id, title, company, location, mode,
-                employment_type, salary, description, url,
-                source, date_posted, valid_through,
+                id, title, company, location, mode, employment_type, salary,
+                description, url, source, date_posted, valid_through,
                 first_seen, last_seen, active
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(url) DO UPDATE SET
                 title=excluded.title,
                 company=excluded.company,
@@ -277,18 +245,18 @@ def upsert(job: dict) -> bool:
                 last_seen=excluded.last_seen,
                 active=1
         """, (
-            ident,
-            job["title"],
-            job.get("company", ""),
-            job.get("location", ""),
-            job.get("mode", "Não informado"),
-            job.get("employment_type", ""),
-            job.get("salary", ""),
-            job.get("description", ""),
+            job_id(url),
+            clean(job.get("title")),
+            clean(job.get("company")),
+            clean(job.get("location")),
+            clean(job.get("mode")) or "Não informado",
+            clean(job.get("employment_type")),
+            clean(job.get("salary")),
+            clean(job.get("description")),
             url,
-            job.get("source", ""),
-            job.get("date_posted", ""),
-            job.get("valid_through", ""),
+            clean(job.get("source")),
+            clean(job.get("date_posted")),
+            clean(job.get("valid_through")),
             now,
             now,
         ))
@@ -298,10 +266,7 @@ def upsert(job: dict) -> bool:
 
 async def fetch_json(client: httpx.AsyncClient, url: str):
     try:
-        response = await client.get(
-            url,
-            follow_redirects=True
-        )
+        response = await client.get(url, follow_redirects=True)
         response.raise_for_status()
         return response.json()
     except Exception:
@@ -309,15 +274,16 @@ async def fetch_json(client: httpx.AsyncClient, url: str):
 
 
 async def greenhouse(client, slug: str) -> tuple[int, int]:
-    data = await fetch_json(
-        client,
-        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+    url = (
+        f"https://boards-api.greenhouse.io/v1/boards/"
+        f"{slug}/jobs?content=true"
     )
+    data = await fetch_json(client, url)
 
     if not isinstance(data, dict):
         return 0, 0
 
-    added = total = 0
+    total = added = 0
 
     for item in data.get("jobs", []):
         url = clean(item.get("absolute_url"))
@@ -327,10 +293,8 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
             continue
 
         loc = clean((item.get("location") or {}).get("name"))
-
         desc = BeautifulSoup(
-            clean(item.get("content")),
-            "html.parser"
+            clean(item.get("content")), "html.parser"
         ).get_text(" ", strip=True)
 
         total += 1
@@ -348,61 +312,15 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
 
     return total, added
 
-async def ashby(client, slug: str) -> tuple[int, int]:
-    data = await fetch_json(
-        client,
-        f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
-    )
 
-    if not isinstance(data, dict):
-        return 0, 0
-
-    added = total = 0
-
-    for item in data.get("jobs", []):
-        if item.get("isListed") is False:
-            continue
-
-        title = clean(item.get("title"))
-        url = clean(item.get("jobUrl") or item.get("applyUrl"))
-
-        if not title or not url:
-            continue
-
-        loc = clean(item.get("location"))
-        workplace = clean(item.get("workplaceType"))
-        desc = clean(
-            item.get("descriptionPlain")
-            or item.get("descriptionHtml")
-        )
-
-        total += 1
-        added += upsert({
-            "title": title,
-            "company": slug,
-            "location": loc,
-            "mode": infer_mode(loc + " " + workplace),
-            "employment_type": clean(item.get("employmentType")),
-            "salary": "",
-            "description": desc,
-            "url": url,
-            "source": "Ashby",
-            "date_posted": clean(item.get("publishedAt")),
-            "valid_through": "",
-        })
-
-    return total, added
-    
 async def lever(client, slug: str) -> tuple[int, int]:
-    data = await fetch_json(
-        client,
-        f"https://api.lever.co/v0/postings/{slug}?mode=json"
-    )
+    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+    data = await fetch_json(client, url)
 
     if not isinstance(data, list):
         return 0, 0
 
-    added = total = 0
+    total = added = 0
 
     for item in data:
         url = clean(item.get("hostedUrl") or item.get("applyUrl"))
@@ -415,11 +333,8 @@ async def lever(client, slug: str) -> tuple[int, int]:
         loc = clean(cats.get("location"))
 
         desc = BeautifulSoup(
-            clean(
-                item.get("descriptionPlain")
-                or item.get("description")
-            ),
-            "html.parser"
+            clean(item.get("descriptionPlain") or item.get("description")),
+            "html.parser",
         ).get_text(" ", strip=True)
 
         total += 1
@@ -439,16 +354,58 @@ async def lever(client, slug: str) -> tuple[int, int]:
     return total, added
 
 
-async def crawl_page(
-    client,
-    url: str,
-    source: str
-) -> tuple[int, int]:
+async def ashby(client, slug: str) -> tuple[int, int]:
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+    data = await fetch_json(client, url)
+
+    if not isinstance(data, dict):
+        return 0, 0
+
+    total = added = 0
+
+    for item in data.get("jobs", []):
+        if item.get("isListed") is False:
+            continue
+
+        title = clean(item.get("title"))
+        url = clean(item.get("jobUrl") or item.get("applyUrl"))
+
+        if not title or not url or not url.startswith(("http://", "https://")):
+            continue
+
+        loc = clean(item.get("location"))
+        workplace = clean(item.get("workplaceType"))
+
+        if item.get("isRemote") is True:
+            workplace += " Remote"
+
+        desc = BeautifulSoup(
+            clean(item.get("descriptionPlain") or item.get("descriptionHtml")),
+            "html.parser",
+        ).get_text(" ", strip=True)
+
+        total += 1
+
+        added += upsert({
+            "title": title,
+            "company": clean(item.get("department")) or slug,
+            "location": loc,
+            "mode": infer_mode(loc + " " + workplace),
+            "employment_type": clean(item.get("employmentType")),
+            "salary": "",
+            "description": desc,
+            "url": url,
+            "source": "Ashby",
+            "date_posted": clean(item.get("publishedAt")),
+            "valid_through": "",
+        })
+
+    return total, added
+
+
+async def crawl_page(client, url: str, source: str) -> tuple[int, int]:
     try:
-        response = await client.get(
-            url,
-            follow_redirects=True
-        )
+        response = await client.get(url, follow_redirects=True)
 
         if response.status_code >= 400:
             return 0, 0
@@ -456,58 +413,41 @@ async def crawl_page(
         soup = BeautifulSoup(response.text, "html.parser")
         found = []
 
-        for tag in soup.find_all(
-            "script",
-            type="application/ld+json"
-        ):
+        for tag in soup.find_all("script", type="application/ld+json"):
             try:
-                raw = tag.string or tag.get_text()
                 found.extend(
                     extract_jobposting(
-                        json.loads(raw),
+                        json.loads(tag.string or tag.get_text()),
                         str(response.url),
-                        source
+                        source,
                     )
                 )
             except Exception:
                 continue
 
-        added = sum(upsert(job) for job in found)
-
-        return len(found), added
+        return len(found), sum(upsert(job) for job in found)
 
     except Exception:
         return 0, 0
 
 
 async def crawl_sitemap(
-    client,
-    sitemap_url: str,
-    limit: int
+    client, sitemap_url: str, limit: int
 ) -> tuple[int, int]:
-    # Só consulta sitemaps explicitamente configurados.
     try:
-        response = await client.get(
-            sitemap_url,
-            follow_redirects=True
-        )
+        response = await client.get(sitemap_url, follow_redirects=True)
 
         if response.status_code >= 400:
             return 0, 0
 
         soup = BeautifulSoup(response.text, "xml")
-        urls = [
-            item.get_text(strip=True)
-            for item in soup.find_all("loc")
-        ]
+        urls = [x.get_text(strip=True) for x in soup.find_all("loc")]
 
         if soup.find("sitemapindex"):
             total = added = 0
 
             for child in urls[:min(limit, 10)]:
-                t, a = await crawl_sitemap(
-                    client, child, limit
-                )
+                t, a = await crawl_sitemap(client, child, limit)
                 total += t
                 added += a
 
@@ -516,9 +456,7 @@ async def crawl_sitemap(
         total = added = 0
 
         for page in urls[:limit]:
-            t, a = await crawl_page(
-                client, page, sitemap_url
-            )
+            t, a = await crawl_page(client, page, sitemap_url)
             total += t
             added += a
             await asyncio.sleep(0.15)
@@ -531,16 +469,6 @@ async def crawl_sitemap(
 
 async def run_crawl() -> dict:
     cfg = config()
-    timeout = float(
-        cfg.get("request_timeout_seconds", 20)
-    )
-
-    headers = {
-        "User-Agent": cfg.get(
-            "user_agent",
-            DEFAULT_CONFIG["user_agent"]
-        )
-    }
 
     stats = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -550,53 +478,88 @@ async def run_crawl() -> dict:
         "errors": [],
     }
 
+    headers = {
+        "User-Agent": cfg.get(
+            "user_agent", DEFAULT_CONFIG["user_agent"]
+        )
+    }
+
     async with httpx.AsyncClient(
-        timeout=timeout,
-        headers=headers
+        timeout=float(cfg.get("request_timeout_seconds", 20)),
+        headers=headers,
     ) as client:
 
-        # Mantém a coleta Greenhouse existente.
         for slug in cfg.get("greenhouse_boards", []):
             try:
                 t, a = await greenhouse(client, slug)
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"Greenhouse {slug}: nenhum registro retornado."
+                    )
+
             except Exception as e:
                 stats["errors"].append(
                     f"Greenhouse {slug}: {str(e)[:180]}"
                 )
 
-        # Mantém a coleta Lever existente.
         for slug in cfg.get("lever_sites", []):
             try:
                 t, a = await lever(client, slug)
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"Lever {slug}: nenhum registro retornado."
+                    )
+
             except Exception as e:
                 stats["errors"].append(
                     f"Lever {slug}: {str(e)[:180]}"
                 )
 
-        # Páginas públicas configuradas individualmente.
-        for url in cfg.get("jsonld_seed_urls", []):
-            t, a = await crawl_page(
-                client, url, "Página pública"
-            )
-            stats["sources_checked"] += 1
-            stats["jobs_seen"] += t
-            stats["jobs_added"] += a
+        for slug in cfg.get("ashby_boards", []):
+            try:
+                t, a = await ashby(client, slug)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
 
-        # NOVO: fontes adicionais configuradas pelo operador.
+                if t == 0:
+                    stats["errors"].append(
+                        f"Ashby {slug}: nenhum registro retornado; "
+                        "confira o identificador do quadro."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Ashby {slug}: {str(e)[:180]}"
+                )
+
+        for url in cfg.get("jsonld_seed_urls", []):
+            try:
+                t, a = await crawl_page(client, url, "Página pública")
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Página pública: {str(e)[:180]}"
+                )
+
         for item in cfg.get("additional_sources", []):
             if isinstance(item, str):
-                url = item
-                source_name = "Página pública"
+                url, name = item, "Página pública"
 
             elif isinstance(item, dict):
                 url = clean(item.get("url"))
-                source_name = clean(
+                name = clean(
                     item.get("name") or item.get("source")
                 ) or "Página pública"
 
@@ -608,13 +571,27 @@ async def run_crawl() -> dict:
 
             if not url.startswith(("http://", "https://")):
                 stats["errors"].append(
-                    f"Fonte adicional inválida: {url[:100]}"
+                    "Fonte adicional inválida: URL ausente ou inválida."
                 )
                 continue
 
             try:
-                t, a = await crawl_page(
-                    client, url, source_name
+                t, a = await crawl_page(client, url, name)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Fonte adicional {name}: {str(e)[:180]}"
+                )
+
+        for url in cfg.get("sitemap_urls", []):
+            try:
+                t, a = await crawl_sitemap(
+                    client,
+                    url,
+                    int(cfg.get("max_pages_per_source", 30)),
                 )
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
@@ -622,44 +599,17 @@ async def run_crawl() -> dict:
 
             except Exception as e:
                 stats["errors"].append(
-                    f"Fonte adicional {source_name}: {str(e)[:180]}"
+                    f"Sitemap: {str(e)[:180]}"
                 )
 
-        # Mantém a coleta por sitemaps existentes.
-        for url in cfg.get("sitemap_urls", []):
-            t, a = await crawl_sitemap(
-                client,
-                url,
-                int(cfg.get("max_pages_per_source", 30))
-            )
-
-            stats["sources_checked"] += 1
-            stats["jobs_seen"] += t
-            stats["jobs_added"] += a
-
-    stats["finished_at"] = datetime.now(
-        timezone.utc
-    ).isoformat()
+    stats["finished_at"] = datetime.now(timezone.utc).isoformat()
 
     with db() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS crawl_runs (
-                id INTEGER PRIMARY KEY,
-                started_at TEXT,
-                finished_at TEXT,
-                sources_checked INTEGER,
-                jobs_seen INTEGER,
-                jobs_added INTEGER,
-                errors TEXT
-            )
-        """)
-
         con.execute("""
             INSERT INTO crawl_runs (
                 started_at, finished_at, sources_checked,
                 jobs_seen, jobs_added, errors
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
         """, (
             stats["started_at"],
             stats["finished_at"],
@@ -682,7 +632,7 @@ async def scheduler():
         await asyncio.sleep(
             max(
                 15,
-                int(config().get("scan_interval_minutes", 360)) * 60
+                int(config().get("scan_interval_minutes", 360)) * 60,
             )
         )
 
@@ -704,8 +654,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Busca Vagas API",
-    version="0.1.0",
-    lifespan=lifespan
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 
@@ -721,131 +671,13 @@ def health():
             "SELECT COUNT(*) FROM jobs WHERE active=1"
         ).fetchone()[0]
 
-        has_runs = con.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name='crawl_runs'
+        last = con.execute("""
+            SELECT finished_at, jobs_seen, jobs_added
+            FROM crawl_runs
+            ORDER BY id DESC LIMIT 1
         """).fetchone()
-
-        last = None
-
-        if has_runs:
-            last = con.execute("""
-                SELECT finished_at, jobs_seen, jobs_added
-                FROM crawl_runs
-                ORDER BY id DESC LIMIT 1
-            """).fetchone()
 
     return {
         "status": "ok",
         "active_jobs": count,
-        "last_crawl": dict(last) if last else None,
-    }
-
-
-@app.get("/api/jobs")
-def jobs(
-    q: str = "",
-    location: str = "",
-    mode: str = "",
-    state: str = "",
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    terms = ["active=1"]
-    args = []
-
-    if q.strip():
-        terms.append(
-            "(title LIKE ? OR company LIKE ? OR description LIKE ?)"
-        )
-        like = "%" + q.strip() + "%"
-        args += [like, like, like]
-
-    if location.strip():
-        terms.append("location LIKE ?")
-        args.append("%" + location.strip() + "%")
-
-    if mode.strip() and mode != "Todas":
-        terms.append("mode=?")
-        args.append(mode)
-
-    if state.strip():
-        terms.append("location LIKE ?")
-        args.append("%" + state.strip() + "%")
-
-    where = " AND ".join(terms)
-
-    with db() as con:
-        total = con.execute(
-            f"SELECT COUNT(*) FROM jobs WHERE {where}",
-            args
-        ).fetchone()[0]
-
-        rows = con.execute(f"""
-            SELECT id, title, company, location, mode,
-                   employment_type, salary, description,
-                   url, source, date_posted, valid_through,
-                   first_seen
-            FROM jobs
-            WHERE {where}
-            ORDER BY COALESCE(date_posted, first_seen) DESC
-            LIMIT ? OFFSET ?
-        """, args + [limit, offset]).fetchall()
-
-    return {
-        "total": total,
-        "items": [dict(row) for row in rows],
-    }
-
-
-@app.get("/api/stats")
-def stats():
-    with db() as con:
-        total = con.execute(
-            "SELECT COUNT(*) FROM jobs WHERE active=1"
-        ).fetchone()[0]
-
-        sources = con.execute(
-            "SELECT COUNT(DISTINCT source) FROM jobs WHERE active=1"
-        ).fetchone()[0]
-
-        has_runs = con.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name='crawl_runs'
-        """).fetchone()
-
-        last = None
-
-        if has_runs:
-            last = con.execute("""
-                SELECT finished_at, jobs_seen, jobs_added,
-                       sources_checked, errors
-                FROM crawl_runs
-                ORDER BY id DESC LIMIT 1
-            """).fetchone()
-
-    return {
-        "active_jobs": total,
-        "sources": sources,
-        "last_crawl": dict(last) if last else None,
-    }
-
-
-@app.post("/api/admin/crawl")
-async def manual_crawl(
-    x_crawl_token: str = Header(default="")
-):
-    if ADMIN_TOKEN and x_crawl_token != ADMIN_TOKEN:
-        raise HTTPException(
-            status_code=403,
-            detail="Token inválido"
-        )
-
-    return await run_crawl()
-
-
-app.mount(
-    "/static",
-    StaticFiles(directory=BASE),
-    name="static"
-)
+        "last_crawl": dict(last) if last els
