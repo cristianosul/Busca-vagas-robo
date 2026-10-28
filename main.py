@@ -194,9 +194,11 @@ def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
             title = clean(obj.get("title"))
 
             if title and url.startswith(("http://", "https://")):
-                loc = location_text(obj.get("jobLocation")) or location_text(
-                    obj.get("applicantLocationRequirements")
-                )
+                loc = location_text(obj.get("jobLocation"))
+
+                if not loc:
+                    loc = location_text(obj.get("jobLocationType"))
+
 
                 desc = BeautifulSoup(
                     clean(obj.get("description")), "html.parser"
