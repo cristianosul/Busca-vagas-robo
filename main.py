@@ -531,10 +531,22 @@ async def gupy(client, keyword: str, limit: int = 50) -> tuple[int, int]:
             if not title or not url:
                 continue
 
-            company = clean(item.get("careerPageName")) or "Empresa"
-            city = clean(item.get("city"))
-            state = clean(item.get("state"))
-            location = ", ".join(x for x in [city, state] if x)
+company = clean(item.get("careerPageName")) or "Empresa"
+
+city = clean(item.get("city"))
+state = clean(item.get("state"))
+
+if not city and isinstance(item.get("city"), dict):
+    city = clean(item["city"].get("name"))
+
+if not state and isinstance(item.get("state"), dict):
+    state = clean(item["state"].get("name"))
+
+location = ", ".join(x for x in [city, state] if x)
+
+if not location:
+    location = location_text(item.get("address"))
+
 
             description = BeautifulSoup(
                 clean(item.get("description")),
