@@ -127,16 +127,53 @@ def location_text(value: Any) -> str:
 
 
 def infer_mode(text: str, job: dict | None = None) -> str:
-    t = (text + " " + clean((job or {}).get("jobLocationType"))).lower()
+    job = job or {}
 
-    if any(x in t for x in ("telecommute", "remote", "remoto", "home office")):
+    # Prioriza o campo estruturado do anúncio.
+    job_type = clean(job.get("jobLocationType")).lower()
+    workplace = clean(
+        job.get("workplaceType") or job.get("workplace_type")
+    ).lower()
+
+    explicit = job_type + " " + workplace
+
+    if any(x in explicit for x in (
+        "telecommute", "remote", "remoto"
+    )):
         return "Remoto"
-    if any(x in t for x in ("hybrid", "híbrido", "hibrido")):
+
+    if any(x in explicit for x in (
+        "hybrid", "híbrido", "hibrido"
+    )):
         return "Híbrido"
-    if any(x in t for x in ("onsite", "on-site", "presencial")):
+
+    if any(x in explicit for x in (
+        "onsite", "on-site", "on site", "presencial"
+    )):
+        return "Presencial"
+
+    # Fallback para localização e descrição.
+    t = (text or "").lower()
+
+    if any(x in t for x in (
+        "home office", "trabalho remoto", "100% remoto",
+        "fully remote", "remote position", "remote work",
+        "trabalho 100% remoto"
+    )):
+        return "Remoto"
+
+    if any(x in t for x in (
+        "hybrid", "híbrido", "hibrido", "modelo híbrido"
+    )):
+        return "Híbrido"
+
+    if any(x in t for x in (
+        "onsite", "on-site", "on site", "presencial"
+    )):
         return "Presencial"
 
     return "Não informado"
+    
 
 
 def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
