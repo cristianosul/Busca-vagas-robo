@@ -197,7 +197,7 @@ def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
                 loc = location_text(obj.get("jobLocation"))
 
                 if not loc:
-                    loc = location_text(obj.get("jobLocationType"))
+                    loc = location_text(obj.get("address"))
 
 
                 desc = BeautifulSoup(
