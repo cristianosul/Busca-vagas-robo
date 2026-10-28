@@ -781,48 +781,49 @@ def jobs(
         like = "%" + q.strip() + "%"
         args.extend([like, like, like])
 
+    
     if location.strip().lower() in ("brasil", "brazil"):
         brazil_patterns = [
-        "%Brasil%", "%Brazil%",
-        "%São Paulo%", "%Rio de Janeiro%",
-        "%Belo Horizonte%", "%Brasília%",
-        "%Curitiba%", "%Porto Alegre%",
-        "%Florianópolis%", "%Caxias do Sul%",
-        "%Salvador%", "%Recife%",
-        "%Fortaleza%", "%Goiânia%",
-        "%Manaus%", "%Campinas%",
-        "%Minas Gerais%", "%Rio Grande do Sul%",
-        "%Santa Catarina%", "%Paraná%",
-        "%Bahia%", "%Pernambuco%",
-        "%Ceará%", "%Espírito Santo%",
-        "%Goiás%", "%Amazonas%",
-        "%Mato Grosso%", "%Mato Grosso do Sul%",
-        "%Pará%", "%Paraíba%", "%Sergipe%",
-        "%Alagoas%", "%Amapá%", "%Acre%",
-        "%Rondônia%", "%Roraima%", "%Tocantins%",
-        "%Maranhão%", "%Piauí%",
-        "%Rio Grande do Norte%"
-    ]
+            "%Brasil%", "%Brazil%",
+            "%São Paulo%", "%Rio de Janeiro%",
+            "%Belo Horizonte%", "%Brasília%",
+            "%Curitiba%", "%Porto Alegre%",
+            "%Florianópolis%", "%Caxias do Sul%",
+            "%Salvador%", "%Recife%",
+            "%Fortaleza%", "%Goiânia%",
+            "%Manaus%", "%Campinas%",
+            "%Minas Gerais%", "%Rio Grande do Sul%",
+            "%Santa Catarina%", "%Paraná%",
+            "%Bahia%", "%Pernambuco%",
+            "%Ceará%", "%Espírito Santo%",
+            "%Goiás%", "%Amazonas%",
+            "%Mato Grosso%", "%Mato Grosso do Sul%",
+            "%Pará%", "%Paraíba%", "%Sergipe%",
+            "%Alagoas%", "%Amapá%", "%Acre%",
+            "%Rondônia%", "%Roraima%", "%Tocantins%",
+            "%Maranhão%", "%Piauí%",
+            "%Rio Grande do Norte%"
+        ]
 
-    location_conditions = " OR ".join(
-        ["location LIKE ?" for _ in brazil_patterns]
-    )
+        location_conditions = " OR ".join(
+            ["location LIKE ?" for _ in brazil_patterns]
+        )
 
-    terms.append(
-        "(" + location_conditions +
-        " OR (mode = 'Remoto' AND ("
-        "description LIKE '%Brazil%' OR "
-        "description LIKE '%Brasil%' OR "
-        "description LIKE '%worldwide%' OR "
-        "description LIKE '%anywhere in the world%'"
-        ")))"
-    )
-    args.extend(brazil_patterns)
-else:
-    if location.strip():
-        terms.append("location LIKE ?")
-        args.append("%" + location.strip() + "%")
-        
+        terms.append(
+            "(" + location_conditions +
+            " OR (mode = 'Remoto' AND ("
+            "description LIKE '%Brazil%' OR "
+            "description LIKE '%Brasil%' OR "
+            "description LIKE '%worldwide%' OR "
+            "description LIKE '%anywhere in the world%'"
+            ")))"
+        )
+        args.extend(brazil_patterns)
+
+    else:
+        if location.strip():
+            terms.append("location LIKE ?")
+            args.append("%" + location.strip() + "%")
 
     if mode.strip() and mode != "Todas":
         terms.append("mode=?")
@@ -833,6 +834,7 @@ else:
         args.append("%" + state.strip() + "%")
 
     where = " AND ".join(terms)
+
 
     with db() as con:
         total = con.execute(
