@@ -513,102 +513,125 @@ async def gupy(
     base_url = "https://portal.gupy.io/api/job-search/jobs"
     total = 0
     added = 0
+    seen_urls = set()
+
+    # Busca até 5 páginas de resultados por palavra-chave.
+    page_size = max(1, min(limit, 50))
+    max_pages = 5
 
     try:
-        response = await client.get(
-            base_url,
-            params={
-                "jobName": keyword,
-                "limit": limit,
-                "offset": 0,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if not isinstance(data, dict):
-            return 0, 0
-
-        for item in data.get("data", []):
-            if not isinstance(item, dict):
-                continue
-
-            title = clean(item.get("name"))
-            url = clean(item.get("jobUrl"))
-
-            if not title or not url.startswith(("http://", "https://")):
-                continue
-
-            company = clean(item.get("careerPageName")) or "Empresa"
-
-            city_value = item.get("city")
-            state_value = item.get("state")
-
-            city = clean(
-                city_value.get("name")
-                if isinstance(city_value, dict)
-                else city_value
+        for page in range(max_pages):
+            response = await client.get(
+                base_url,
+                params={
+                    "jobName": keyword,
+                    "limit": page_size,
+                    "offset": page * page_size,
+                },
             )
-            state = clean(
-                state_value.get("name")
-                if isinstance(state_value, dict)
-                else state_value
-            )
+            response.raise_for_status()
+            data = response.json()
 
-            location = ", ".join(
-                value for value in (city, state) if value
-            )
+            if not isinstance(data, dict):
+                break
 
-            if not location:
-                location = location_text(item.get("address"))
+            items = data.get("data", [])
 
-            description = BeautifulSoup(
-                clean(item.get("description")),
-                "html.parser",
-            ).get_text(" ", strip=True)
+            if not isinstance(items, list) or not items:
+                break
 
-            workplace = clean(item.get("workplaceType")).lower()
+            page_valid = 0
 
-            if workplace in (
-                "on-site",
-                "onsite",
-                "on_site",
-                "presencial",
-            ):
-                mode = "Presencial"
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
 
-            elif workplace in (
-                "hybrid",
-                "híbrido",
-                "hibrido",
-            ):
-                mode = "Híbrido"
+                title = clean(item.get("name"))
+                url = clean(item.get("jobUrl")).split("#")[0]
 
-            elif workplace in (
-                "remote",
-                "remoto",
-                "telecommute",
-            ):
-                mode = "Remoto"
+                if (
+                    not title
+                    or not url.startswith(("http://", "https://"))
+                    or url in seen_urls
+                ):
+                    continue
 
-            else:
-                mode = infer_mode(location + " " + description)
+                seen_urls.add(url)
 
-            total += 1
+                company = (
+                    clean(item.get("careerPageName")) or "Empresa"
+                )
 
-            added += upsert({
-                "title": title,
-                "company": company,
-                "location": location,
-                "mode": mode,
-                "description": description,
-                "url": url,
-                "source": "Gupy",
-                "date_posted": clean(item.get("publishedDate")),
-                "valid_through": clean(
-                    item.get("applicationDeadline")
-                ),
-            })
+                city_value = item.get("city")
+                state_value = item.get("state")
+
+                city = clean(
+                    city_value.get("name")
+                    if isinstance(city_value, dict)
+                    else city_value
+                )
+                state = clean(
+                    state_value.get("name")
+                    if isinstance(state_value, dict)
+                    else state_value
+                )
+
+                location = ", ".join(
+                    value for value in (city, state) if value
+                )
+
+                if not location:
+                    location = location_text(item.get("address"))
+
+                description = BeautifulSoup(
+                    clean(item.get("description")),
+                    "html.parser",
+                ).get_text(" ", strip=True)
+
+                workplace = clean(
+                    item.get("workplaceType")
+                ).lower()
+
+                if workplace in (
+                    "on-site", "onsite", "on_site", "presencial"
+                ):
+                    mode = "Presencial"
+                elif workplace in ("hybrid", "híbrido", "hibrido"):
+                    mode = "Híbrido"
+                elif workplace in (
+                    "remote", "remoto", "telecommute"
+                ):
+                    mode = "Remoto"
+                else:
+                    mode = infer_mode(
+                        location + " " + description
+                    )
+
+                total += 1
+                page_valid += 1
+
+                added += upsert({
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "mode": mode,
+                    "description": description,
+                    "url": url,
+                    "source": "Gupy",
+                    "date_posted": clean(
+                        item.get("publishedDate")
+                    ),
+                    "valid_through": clean(
+                        item.get("applicationDeadline")
+                    ),
+                })
+
+            # Evita novas requisições quando a página não
+            # contém anúncios válidos.
+            if len(items) < page_size:
+                break
+
+            await asyncio.sleep(0.2)
 
     except Exception as e:
         raise RuntimeError(
@@ -616,7 +639,7 @@ async def gupy(
         ) from e
 
     return total, added
-    
+   
 async def run_crawl() -> dict:
     cfg = config()
 
