@@ -692,11 +692,26 @@ async def run_crawl() -> dict:
                 )
 
         for keyword in [
-            "auxiliar",
-            "analista",
-            "vendedor",
-            "operador",
-            "estágio",
+             "auxiliar",
+             "analista",
+             "assistente",
+             "vendedor",
+             "operador",
+             "estágio",
+             "jovem aprendiz",
+             "atendente",
+             "administrativo",
+             "financeiro",
+             "recursos humanos",
+             "logística",
+             "produção",
+             "técnico",
+             "engenheiro",
+             "desenvolvedor",
+             "marketing",
+             "motorista",
+             "estoquista",
+             "recepcionista",
         ]:
             try:
                 t, a = await gupy(client, keyword, 50)
