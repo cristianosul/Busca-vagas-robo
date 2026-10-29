@@ -954,11 +954,11 @@ def jobs(
             args.append("%" + location.strip() + "%")
 
         if mode.strip() and mode != "Todas":
-        if mode.strip().lower() in ("hibrido", "híbrido"):
-        terms.append(
-            "LOWER(REPLACE(mode, 'í', 'i')) = ?"
-        )
-        args.append("hibrido")
+           if mode.strip().lower() in ("hibrido", "híbrido"):
+              terms.append(
+                 "LOWER(REPLACE(mode, 'í', 'i')) = ?"
+              )
+              args.append("hibrido")
     else:
         terms.append("LOWER(mode)=LOWER(?)")
         args.append(mode.strip())
