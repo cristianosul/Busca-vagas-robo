@@ -897,7 +897,10 @@ def jobs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    terms, args = ["active=1"], []
+    terms, args = [
+    "active=1",
+    "(valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
+], []
 
     if q.strip():
         terms.append(
