@@ -506,8 +506,14 @@ async def crawl_sitemap(
         return 0, 0
 
 async def gupy(client, keyword: str, limit: int = 50) -> tuple[int, int]:
+async def gupy(
+    client: httpx.AsyncClient,
+    keyword: str,
+    limit: int = 50,
+) -> tuple[int, int]:
     base_url = "https://portal.gupy.io/api/job-search/jobs"
-    total = added = 0
+    total = 0
+    added = 0
 
     try:
         response = await client.get(
@@ -525,28 +531,37 @@ async def gupy(client, keyword: str, limit: int = 50) -> tuple[int, int]:
             return 0, 0
 
         for item in data.get("data", []):
+            if not isinstance(item, dict):
+                continue
+
             title = clean(item.get("name"))
             url = clean(item.get("jobUrl"))
 
-            if not title or not url:
+            if not title or not url.startswith(("http://", "https://")):
                 continue
 
-company = clean(item.get("careerPageName")) or "Empresa"
+            company = clean(item.get("careerPageName")) or "Empresa"
 
-city = clean(item.get("city"))
-state = clean(item.get("state"))
+            city_value = item.get("city")
+            state_value = item.get("state")
 
-if not city and isinstance(item.get("city"), dict):
-    city = clean(item["city"].get("name"))
+            city = clean(
+                city_value.get("name")
+                if isinstance(city_value, dict)
+                else city_value
+            )
+            state = clean(
+                state_value.get("name")
+                if isinstance(state_value, dict)
+                else state_value
+            )
 
-if not state and isinstance(item.get("state"), dict):
-    state = clean(item["state"].get("name"))
+            location = ", ".join(
+                value for value in (city, state) if value
+            )
 
-location = ", ".join(x for x in [city, state] if x)
-
-if not location:
-    location = location_text(item.get("address"))
-
+            if not location:
+                location = location_text(item.get("address"))
 
             description = BeautifulSoup(
                 clean(item.get("description")),
@@ -554,16 +569,34 @@ if not location:
             ).get_text(" ", strip=True)
 
             workplace = clean(item.get("workplaceType")).lower()
-            if workplace == "on-site":
+
+            if workplace in (
+                "on-site",
+                "onsite",
+                "on_site",
+                "presencial",
+            ):
                 mode = "Presencial"
-            elif workplace == "hybrid":
+
+            elif workplace in (
+                "hybrid",
+                "híbrido",
+                "hibrido",
+            ):
                 mode = "Híbrido"
-            elif workplace == "remote":
+
+            elif workplace in (
+                "remote",
+                "remoto",
+                "telecommute",
+            ):
                 mode = "Remoto"
+
             else:
                 mode = infer_mode(location + " " + description)
 
             total += 1
+
             added += upsert({
                 "title": title,
                 "company": company,
@@ -573,11 +606,15 @@ if not location:
                 "url": url,
                 "source": "Gupy",
                 "date_posted": clean(item.get("publishedDate")),
-                "valid_through": clean(item.get("applicationDeadline")),
+                "valid_through": clean(
+                    item.get("applicationDeadline")
+                ),
             })
 
     except Exception as e:
-        raise RuntimeError(f"Gupy ({keyword}): {str(e)[:150]}") from e
+        raise RuntimeError(
+            f"Gupy ({keyword}): {str(e)[:150]}"
+        ) from e
 
     return total, added
     
