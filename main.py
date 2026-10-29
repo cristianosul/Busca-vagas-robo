@@ -505,7 +505,6 @@ async def crawl_sitemap(
     except Exception:
         return 0, 0
 
-async def gupy(client, keyword: str, limit: int = 50) -> tuple[int, int]:
 async def gupy(
     client: httpx.AsyncClient,
     keyword: str,
