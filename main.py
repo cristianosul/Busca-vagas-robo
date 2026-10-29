@@ -953,11 +953,17 @@ def jobs(
             terms.append("location LIKE ?")
             args.append("%" + location.strip() + "%")
 
-    if mode.strip() and mode != "Todas":
+        if mode.strip() and mode != "Todas":
+        if mode.strip().lower() in ("hibrido", "híbrido"):
+        terms.append(
+            "LOWER(REPLACE(mode, 'í', 'i')) = ?"
+        )
+        args.append("hibrido")
+    else:
         terms.append("LOWER(mode)=LOWER(?)")
-        args.append(mode)
-
-    if state.strip():
+        args.append(mode.strip())
+        
+   if state.strip():
         terms.append("location LIKE ?")
         args.append("%" + state.strip() + "%")
 
