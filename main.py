@@ -928,7 +928,7 @@ def jobs(
             args.append("%" + location.strip() + "%")
 
     if mode.strip() and mode != "Todas":
-        terms.append("mode=?")
+        terms.append("LOWER(mode)=LOWER(?)")
         args.append(mode)
 
     if state.strip():
