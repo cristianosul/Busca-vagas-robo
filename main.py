@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "greenhouse_boards": [],
     "lever_sites": [],
     "ashby_boards": [],
+    "smartrecruiters_companies": [],
     "jsonld_seed_urls": [],
     "sitemap_urls": [],
     "additional_sources": [],
