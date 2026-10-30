@@ -822,6 +822,32 @@ async def run_crawl() -> dict:
                 stats["errors"].append(
                     f"Ashby {slug}: {str(e)[:180]}"
                 )
+        
+        for slug in cfg.get("smartrecruiters_companies", []):
+            try:
+                t, a = await smartrecruiters(
+                    client,
+                    slug,
+                    max_pages=min(
+                        5,
+                        int(cfg.get("max_pages_per_source", 30))
+                    ),
+                )
+
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"SmartRecruiters {slug}: nenhum registro retornado; "
+                        "confira o identificador da empresa."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"SmartRecruiters {slug}: {str(e)[:180]}"
+                )
 
         for keyword in [
              "auxiliar",
