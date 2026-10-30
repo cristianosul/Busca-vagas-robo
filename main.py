@@ -959,9 +959,9 @@ def jobs(
                  "LOWER(REPLACE(mode, 'í', 'i')) = ?"
               )
               args.append("hibrido")
-    else:
-        terms.append("LOWER(mode)=LOWER(?)")
-        args.append(mode.strip())
+           else:
+             terms.append("LOWER(mode)=LOWER(?)")
+             args.append(mode.strip())
         
    if state.strip():
         terms.append("location LIKE ?")
