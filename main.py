@@ -443,6 +443,114 @@ async def ashby(client, slug: str) -> tuple[int, int]:
     return total, added
 
 
+async def smartrecruiters(
+    client: httpx.AsyncClient,
+    slug: str,
+    max_pages: int = 5,
+) -> tuple[int, int]:
+    base_url = (
+        f"https://api.smartrecruiters.com/v1/"
+        f"companies/{slug}/postings"
+    )
+
+    total = 0
+    added = 0
+    limit = 100
+
+    for page in range(max_pages):
+        response = await client.get(
+            base_url,
+            params={
+                "limit": limit,
+                "offset": page * limit,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, dict):
+            break
+
+        items = data.get("content", [])
+
+        if not isinstance(items, list) or not items:
+            break
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            title = clean(item.get("name"))
+            posting_id = clean(item.get("id"))
+
+            if not title or not posting_id:
+                continue
+
+            company_data = item.get("company") or {}
+            company = (
+                clean(company_data.get("name"))
+                if isinstance(company_data, dict)
+                else ""
+            ) or slug
+
+            loc_data = item.get("location") or {}
+
+            if isinstance(loc_data, dict):
+                location = ", ".join(
+                    clean(loc_data.get(key))
+                    for key in ("city", "region", "country")
+                    if clean(loc_data.get(key))
+                )
+                is_remote = loc_data.get("remote") is True
+            else:
+                location = clean(loc_data)
+                is_remote = False
+
+            employment = item.get("typeOfEmployment") or {}
+
+            if isinstance(employment, dict):
+                employment_type = clean(
+                    employment.get("label")
+                )
+            else:
+                employment_type = clean(employment)
+
+            if is_remote:
+                mode = "Remoto"
+            else:
+                mode = infer_mode(location)
+
+            url = (
+                clean(item.get("postingUrl"))
+                or clean(item.get("applyUrl"))
+                or f"https://jobs.smartrecruiters.com/{slug}/{posting_id}"
+            )
+
+            if not url.startswith(("http://", "https://")):
+                continue
+
+            total += 1
+
+            added += upsert({
+                "title": title,
+                "company": company,
+                "location": location,
+                "mode": mode,
+                "employment_type": employment_type,
+                "description": "",
+                "url": url,
+                "source": "SmartRecruiters",
+                "date_posted": clean(item.get("releasedDate")),
+            })
+
+        if len(items) < limit:
+            break
+
+        await asyncio.sleep(0.2)
+
+    return total, added
+    
+
 async def crawl_page(client, url: str, source: str) -> tuple[int, int]:
     try:
         response = await client.get(url, follow_redirects=True)
