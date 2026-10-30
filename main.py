@@ -827,11 +827,31 @@ async def run_crawl() -> dict:
 
 
 async def scheduler():
+    import logging
+
+    logger = logging.getLogger("uvicorn.error")
+
     while True:
         try:
-            await run_crawl()
+            logger.info("ROBÔ: iniciando coleta automática.")
+            result = await run_crawl()
+
+            logger.info(
+                "ROBÔ: coleta concluída. "
+                f"Fontes verificadas: {result['sources_checked']}; "
+                f"Vagas encontradas: {result['jobs_seen']}; "
+                f"Novas vagas: {result['jobs_added']}; "
+                f"Erros: {len(result['errors'])}"
+            )
+
+            for error in result["errors"]:
+                logger.warning("ROBÔ - FONTE: %s", error)
+
+        except asyncio.CancelledError:
+            raise
+
         except Exception:
-            pass
+            logger.exception("ROBÔ: falha na coleta automática.")
 
         await asyncio.sleep(
             max(
