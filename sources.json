@@ -10,7 +10,12 @@
     "ciandt"
   ],
   "ashby_boards": [],
-  "smartrecruiters_companies": [],
+  "smartrecruiters_companies": [
+  "Experian",
+  "Expeditors",
+  "Continental",
+  "AFRY"
+],
   "jsonld_seed_urls": [],
   "sitemap_urls": [],
   "additional_sources": [
