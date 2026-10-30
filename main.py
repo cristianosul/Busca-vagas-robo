@@ -963,9 +963,9 @@ def jobs(
                 terms.append("LOWER(mode)=LOWER(?)")
                 args.append(mode.strip())  
     
-   if state.strip():
-        terms.append("location LIKE ?")
-        args.append("%" + state.strip() + "%")
+        if state.strip():
+            terms.append("location LIKE ?")
+            args.append("%" + state.strip() + "%")
 
     where = " AND ".join(terms)
 
