@@ -22,6 +22,7 @@ load_dotenv()
 
 BASE = Path(__file__).resolve().parent
 CONFIG_PATH = BASE / "sources.json"
+FGTAS_DATA_PATH = BASE / "fgtas_sine_caxias_2026-11-03.json"
 DB_PATH = os.getenv("DATABASE_PATH", str(BASE / "busca_vagas.db"))
 ADMIN_TOKEN = os.getenv("CRAWL_ADMIN_TOKEN", "")
 
@@ -748,7 +749,120 @@ async def gupy(
         ) from e
 
     return total, added
-   
+
+def import_fgtas_jobs() -> dict:
+    """Importa vagas do painel FGTAS/SINE para o SQLite."""
+
+    result = {
+        "jobs_seen": 0,
+        "jobs_added": 0,
+        "errors": []
+    }
+
+    if not FGTAS_DATA_PATH.exists():
+        result["errors"].append(
+            f"Arquivo FGTAS não encontrado: "
+            f"{FGTAS_DATA_PATH.name}"
+        )
+        return result
+
+    try:
+        payload = json.loads(
+            FGTAS_DATA_PATH.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(payload, dict):
+            raise ValueError("Formato JSON inválido.")
+
+        items = payload.get("items", [])
+
+        if not isinstance(items, list):
+            raise ValueError("A lista de vagas é inválida.")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            code = clean(item.get("source_id"))
+            title = clean(item.get("title"))
+
+            if not code or not title:
+                continue
+
+            details = [
+                f"Código da vaga FGTAS/SINE: {code}"
+            ]
+
+            description = clean(item.get("description"))
+            instructions = clean(
+                item.get("application_instructions")
+            )
+
+            if description:
+                details.append(description)
+
+            if instructions:
+                details.append(
+                    "COMO SE CANDIDATAR: " + instructions
+                )
+
+            if item.get("pcd_exclusive"):
+                details.append(
+                    "Vaga exclusiva para pessoa com deficiência (PCD)."
+                )
+
+            if item.get("no_experience_required"):
+                details.append(
+                    "Não exige experiência, conforme publicação."
+                )
+
+            url = (
+                "https://www.fgtas.rs.gov.br/?vaga=" + code
+            )
+
+            result["jobs_seen"] += 1
+
+            result["jobs_added"] += upsert({
+                "title": title,
+                "company": (
+                    clean(item.get("company"))
+                    or "Confidencial"
+                ),
+                "location": (
+                    clean(item.get("location"))
+                    or "Caxias do Sul, RS"
+                ),
+                "mode": (
+                    clean(item.get("mode"))
+                    or "Presencial"
+                ),
+                "employment_type": clean(
+                    item.get("employment_type")
+                ),
+                "salary": clean(item.get("salary")),
+                "description": " | ".join(details),
+                "url": url,
+                "source": (
+                    clean(item.get("source"))
+                    or "FGTAS/SINE Caxias do Sul"
+                ),
+                "date_posted": (
+                    clean(item.get("publication_date"))
+                    or clean(payload.get("publication_date"))
+                ),
+                "valid_through": (
+                    clean(item.get("valid_through"))
+                    or clean(payload.get("publication_date"))
+                ),
+            })
+
+    except Exception as exc:
+        result["errors"].append(
+            f"Importação FGTAS: {str(exc)[:180]}"
+        )
+
+    return result
+    
 async def run_crawl() -> dict:
     cfg = config()
 
@@ -999,6 +1113,23 @@ async def scheduler():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+
+    imported = import_fgtas_jobs()
+
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+
+    logger.info(
+        "FGTAS/SINE: registros lidos=%s; "
+        "novas vagas=%s; erros=%s",
+        imported["jobs_seen"],
+        imported["jobs_added"],
+        len(imported["errors"])
+    )
+
+    for error in imported["errors"]:
+        logger.warning("FGTAS/SINE: %s", error)
+
     task = asyncio.create_task(scheduler())
 
     yield
@@ -1009,7 +1140,7 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
-
+        
 
 app = FastAPI(
     title="Busca Vagas API",
