@@ -1069,6 +1069,14 @@ async def run_crawl() -> dict:
                     f"Sitemap: {str(e)[:180]}"
                 )
 
+        expired = deactivate_expired_jobs()
+
+    stats["expired_jobs"] = expired
+
+    if expired:
+        stats["errors"].append(
+            f"{expired} vagas vencidas foram desativadas."
+        )
     stats["finished_at"] = datetime.now(timezone.utc).isoformat()
 
     with db() as con:
