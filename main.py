@@ -850,10 +850,7 @@ def import_fgtas_jobs() -> dict:
                     clean(item.get("publication_date"))
                     or clean(payload.get("publication_date"))
                 ),
-                "valid_through": (
-                    clean(item.get("valid_through"))
-                    or clean(payload.get("publication_date"))
-                ),
+                "valid_through":clean(item.get("valid_through")),
             })
 
     except Exception as exc:
