@@ -6,6 +6,8 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
+from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ CONFIG_PATH = BASE / "sources.json"
 FGTAS_DATA_PATH = BASE / "fgtas_sine_caxias_2026-11-03.json"
 DB_PATH = os.getenv("DATABASE_PATH", str(BASE / "busca_vagas.db"))
 ADMIN_TOKEN = os.getenv("CRAWL_ADMIN_TOKEN", "")
+CRAWL_METRICS: dict | None = None
 
 DEFAULT_CONFIG = {
     "scan_interval_minutes": 360,
@@ -92,10 +95,57 @@ def init_db():
                 errors TEXT
             )
         """)
+        # Migrações compatíveis: preservam todos os registros já existentes.
+        run_columns = {
+            row["name"] for row in con.execute("PRAGMA table_info(crawl_runs)")
+        }
+        for column in ("duplicates", "expired_jobs"):
+            if column not in run_columns:
+                con.execute(
+                    f"ALTER TABLE crawl_runs ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+
+        job_columns = {
+            row["name"] for row in con.execute("PRAGMA table_info(jobs)")
+        }
+        if "canonical_key" not in job_columns:
+            con.execute(
+                "ALTER TABLE jobs ADD COLUMN canonical_key TEXT NOT NULL DEFAULT ''"
+            )
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS job_aliases (
+                alias_url TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )
+        """)
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_canonical_key ON jobs(canonical_key)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_date_posted ON jobs(date_posted)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_aliases_job_id ON job_aliases(job_id)"
+        )
+        existing_jobs = con.execute("""
+            SELECT id, title, company, location
+            FROM jobs WHERE canonical_key=''
+        """).fetchall()
+        for row in existing_jobs:
+            key = canonical_job_key(dict(row))
+            if key:
+                con.execute(
+                    "UPDATE jobs SET canonical_key=? WHERE id=?",
+                    (key, row["id"])
+                )
 
 
 def deactivate_expired_jobs() -> int:
-    """Desativa vagas cuja validade já terminou."""
+    """Desativa apenas vagas com data de validade explícita já vencida."""
     today = datetime.now().date().isoformat()
 
     with db() as con:
@@ -270,56 +320,144 @@ def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
     return found
 
 
-def upsert(job: dict) -> bool:
-    url = clean(job.get("url")).split("#")[0]
+def normalized_text(value: Any) -> str:
+    """Normaliza texto para comparar anúncios sem depender de acentos."""
+    value = unicodedata.normalize("NFKD", clean(value).lower())
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\\s+", " ", value).strip()
 
-    if not url.startswith(("http://", "https://")) or not clean(job.get("title")):
+
+def valid_http_url(value: Any) -> bool:
+    """Valida formato HTTP(S); não garante que a página continue online."""
+    try:
+        parsed = urlsplit(clean(value))
+        return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+    except ValueError:
+        return False
+
+
+def canonical_job_key(job: dict) -> str:
+    title = normalized_text(job.get("title"))
+    company = normalized_text(job.get("company"))
+    location = normalized_text(job.get("location"))
+
+    # Deduplicação cruzada conservadora: não funde empresas desconhecidas
+    # nem anúncios sem localidade, para reduzir falsos positivos.
+    generic_companies = {"", "empresa", "confidencial", "unknown", "nao informado"}
+    if not title or not company or company in generic_companies or not location:
+        return ""
+
+    raw = "|".join((title, company, location))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def upsert(job: dict) -> bool:
+    url = clean(job.get("url")).split("#")[0].strip()
+
+    if not valid_http_url(url) or not clean(job.get("title")):
         return False
 
     now = datetime.now(timezone.utc).isoformat()
+    title = clean(job.get("title"))
+    company = clean(job.get("company"))
+    location = clean(job.get("location"))
+    incoming_valid_through = clean(job.get("valid_through"))
+    canonical_key = canonical_job_key(job)
 
     with db() as con:
         old = con.execute(
             "SELECT id FROM jobs WHERE url=?", (url,)
         ).fetchone()
 
+        if old:
+            con.execute("""
+                UPDATE jobs
+                SET title=?,
+                    company=CASE WHEN ?='' THEN company ELSE ? END,
+                    location=CASE WHEN ?='' THEN location ELSE ? END,
+                    mode=CASE WHEN ?='' THEN mode ELSE ? END,
+                    employment_type=CASE WHEN ?='' THEN employment_type ELSE ? END,
+                    salary=CASE WHEN ?='' THEN salary ELSE ? END,
+                    description=CASE WHEN ?='' THEN description ELSE ? END,
+                    source=CASE WHEN ?='' THEN source ELSE ? END,
+                    date_posted=CASE WHEN ?='' THEN date_posted ELSE ? END,
+                    valid_through=CASE WHEN ?='' THEN valid_through ELSE ? END,
+                    canonical_key=CASE WHEN ?='' THEN canonical_key ELSE ? END,
+                    last_seen=?,
+                    active=CASE
+                        WHEN date(COALESCE(NULLIF(?, ''), valid_through)) < date('now')
+                             AND COALESCE(NULLIF(?, ''), valid_through) != ''
+                        THEN 0 ELSE active END
+                WHERE url=?
+            """, (
+                title, company, company, location, location,
+                clean(job.get("mode")), clean(job.get("mode")),
+                clean(job.get("employment_type")), clean(job.get("employment_type")),
+                clean(job.get("salary")), clean(job.get("salary")),
+                clean(job.get("description")), clean(job.get("description")),
+                clean(job.get("source")), clean(job.get("source")),
+                clean(job.get("date_posted")), clean(job.get("date_posted")),
+                incoming_valid_through, incoming_valid_through,
+                canonical_key, canonical_key, now,
+                incoming_valid_through, incoming_valid_through, url
+            ))
+            if CRAWL_METRICS is not None:
+                CRAWL_METRICS["duplicates"] += 1
+            return False
+
+        # Procura anúncio equivalente de outra fonte nos últimos 45 dias.
+        if canonical_key:
+            match = con.execute("""
+                SELECT id FROM jobs
+                WHERE canonical_key=?
+                  AND first_seen >= datetime('now', '-45 days')
+                ORDER BY first_seen DESC
+                LIMIT 1
+            """, (canonical_key,)).fetchone()
+
+            if match:
+                con.execute("""
+                    INSERT INTO job_aliases (
+                        alias_url, job_id, source, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(alias_url) DO UPDATE SET
+                        last_seen=excluded.last_seen,
+                        source=excluded.source
+                """, (url, match["id"], clean(job.get("source")), now, now))
+                con.execute(
+                    "UPDATE jobs SET last_seen=? WHERE id=?",
+                    (now, match["id"])
+                )
+                if CRAWL_METRICS is not None:
+                    CRAWL_METRICS["duplicates"] += 1
+                return False
+
+        expiry = incoming_valid_through
+        expired = bool(
+            expiry and con.execute(
+                "SELECT date(?) < date('now')", (expiry,)
+            ).fetchone()[0]
+        )
+
         con.execute("""
             INSERT INTO jobs (
                 id, title, company, location, mode, employment_type, salary,
                 description, url, source, date_posted, valid_through,
-                first_seen, last_seen, active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(url) DO UPDATE SET
-                title=excluded.title,
-                company=excluded.company,
-                location=excluded.location,
-                mode=excluded.mode,
-                employment_type=excluded.employment_type,
-                salary=excluded.salary,
-                description=excluded.description,
-                source=excluded.source,
-                date_posted=excluded.date_posted,
-                valid_through=excluded.valid_through,
-                last_seen=excluded.last_seen,
-                active=1
+                first_seen, last_seen, active, canonical_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            job_id(url),
-            clean(job.get("title")),
-            clean(job.get("company")),
-            clean(job.get("location")),
+            job_id(url), title, company, location,
             clean(job.get("mode")) or "Não informado",
             clean(job.get("employment_type")),
             clean(job.get("salary")),
             clean(job.get("description")),
-            url,
-            clean(job.get("source")),
-            clean(job.get("date_posted")),
-            clean(job.get("valid_through")),
-            now,
-            now,
+            url, clean(job.get("source")),
+            clean(job.get("date_posted")), expiry,
+            now, now, 0 if expired else 1, canonical_key
         ))
 
-    return old is None
+    return True
 
 
 async def fetch_json(client: httpx.AsyncClient, url: str):
@@ -878,6 +1016,8 @@ def import_fgtas_jobs() -> dict:
     return result
     
 async def run_crawl() -> dict:
+    global CRAWL_METRICS
+    CRAWL_METRICS = {"duplicates": 0}
     cfg = config()
 
     stats = {
@@ -885,6 +1025,8 @@ async def run_crawl() -> dict:
         "sources_checked": 0,
         "jobs_seen": 0,
         "jobs_added": 0,
+        "duplicates": 0,
+        "expired_jobs": 0,
         "errors": [],
     }
 
@@ -1072,19 +1214,16 @@ async def run_crawl() -> dict:
         expired = deactivate_expired_jobs()
 
     stats["expired_jobs"] = expired
-
-    if expired:
-        stats["errors"].append(
-            f"{expired} vagas vencidas foram desativadas."
-        )
+    stats["duplicates"] = CRAWL_METRICS["duplicates"]
+    CRAWL_METRICS = None
     stats["finished_at"] = datetime.now(timezone.utc).isoformat()
 
     with db() as con:
         con.execute("""
             INSERT INTO crawl_runs (
                 started_at, finished_at, sources_checked,
-                jobs_seen, jobs_added, errors
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                jobs_seen, jobs_added, errors, duplicates, expired_jobs
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             stats["started_at"],
             stats["finished_at"],
@@ -1092,6 +1231,8 @@ async def run_crawl() -> dict:
             stats["jobs_seen"],
             stats["jobs_added"],
             json.dumps(stats["errors"], ensure_ascii=False),
+            stats["duplicates"],
+            stats["expired_jobs"],
         ))
 
     return stats
@@ -1112,6 +1253,8 @@ async def scheduler():
                 f"Fontes verificadas: {result['sources_checked']}; "
                 f"Vagas encontradas: {result['jobs_seen']}; "
                 f"Novas vagas: {result['jobs_added']}; "
+                f"Duplicadas: {result['duplicates']}; "
+                f"Expiradas desativadas: {result['expired_jobs']}; "
                 f"Erros: {len(result['errors'])}"
             )
 
@@ -1166,7 +1309,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Busca Vagas API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -1184,7 +1327,8 @@ def health():
         ).fetchone()[0]
 
         last = con.execute("""
-            SELECT finished_at, jobs_seen, jobs_added
+            SELECT finished_at, jobs_seen, jobs_added,
+                   duplicates, expired_jobs, sources_checked, errors
             FROM crawl_runs
             ORDER BY id DESC LIMIT 1
         """).fetchone()
@@ -1289,7 +1433,10 @@ def jobs(
                    source, date_posted, valid_through, first_seen
             FROM jobs
             WHERE {where}
-            ORDER BY COALESCE(date_posted, first_seen) DESC
+            ORDER BY
+                CASE WHEN TRIM(COALESCE(date_posted, '')) = '' THEN 1 ELSE 0 END,
+                date(date_posted) DESC,
+                first_seen DESC
             LIMIT ? OFFSET ?
         """, args + [limit, offset]).fetchall()
 
@@ -1307,12 +1454,15 @@ def stats():
         ).fetchone()[0]
 
         sources = con.execute(
-            "SELECT COUNT(DISTINCT source) FROM jobs WHERE active=1"
+            """SELECT COUNT(DISTINCT source) FROM jobs
+               WHERE active=1
+                 AND (valid_through IS NULL OR TRIM(valid_through)=''
+                      OR date(valid_through) >= date('now'))"""
         ).fetchone()[0]
 
         last = con.execute("""
             SELECT finished_at, jobs_seen, jobs_added,
-                   sources_checked, errors
+                   sources_checked, duplicates, expired_jobs, errors
             FROM crawl_runs
             ORDER BY id DESC LIMIT 1
         """).fetchone()
