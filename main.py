@@ -1155,7 +1155,7 @@ def home():
 def health():
     with db() as con:
         count = con.execute(
-            "SELECT COUNT(*) FROM jobs WHERE active=1"
+            "SELECT COUNT(*) FROM jobs WHERE active=1 AND (valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
         ).fetchone()[0]
 
         last = con.execute("""
@@ -1278,7 +1278,7 @@ def jobs(
 def stats():
     with db() as con:
         total = con.execute(
-            "SELECT COUNT(*) FROM jobs WHERE active=1"
+            "SELECT COUNT(*) FROM jobs WHERE active=1 AND (valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
         ).fetchone()[0]
 
         sources = con.execute(
