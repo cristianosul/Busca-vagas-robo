@@ -94,6 +94,23 @@ def init_db():
         """)
 
 
+def deactivate_expired_jobs() -> int:
+    """Desativa vagas cuja validade já terminou."""
+    today = datetime.now().date().isoformat()
+
+    with db() as con:
+        cursor = con.execute("""
+            UPDATE jobs
+            SET active = 0
+            WHERE active = 1
+              AND TRIM(valid_through) != ''
+              AND date(valid_through) IS NOT NULL
+              AND date(valid_through) < date(?)
+        """, (today,))
+
+        return cursor.rowcount
+
+
 def clean(value: Any) -> str:
     if value is None:
         return ""
