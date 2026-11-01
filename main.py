@@ -1507,7 +1507,7 @@ app = FastAPI(
 )
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return FileResponse(BASE / "index.html")
 
