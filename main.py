@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 import unicodedata
 from urllib.parse import urlsplit
 from contextlib import asynccontextmanager
@@ -17,7 +18,8 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
@@ -1565,6 +1567,68 @@ def stats():
         },
         "last_crawl": dict(last) if last else None,
     }
+
+
+@app.get("/admin/backup", response_class=HTMLResponse)
+def backup_page():
+    return HTMLResponse("""<!doctype html>
+<html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backup - Busca Vagas</title>
+<body style="font-family:Arial,sans-serif;background:#101522;color:#fff;padding:24px;max-width:520px;margin:30px auto">
+<h2>Backup do Busca Vagas</h2>
+<p>Digite o valor da variável CRAWL_ADMIN_TOKEN configurada no Render. O token será enviado somente no cabeçalho da solicitação.</p>
+<input id="token" type="password" autocomplete="current-password" placeholder="Token de segurança" style="box-sizing:border-box;width:100%;padding:14px;border-radius:8px;border:1px solid #555;margin:12px 0;background:#202a3b;color:white">
+<button id="download" style="padding:14px 18px;border:0;border-radius:8px;background:#8b5cf6;color:white;font-weight:bold">Baixar backup completo</button>
+<p id="status" role="status"></p>
+<script>
+document.getElementById('download').addEventListener('click', async () => {
+  const token = document.getElementById('token').value;
+  const status = document.getElementById('status');
+  if (!token) { status.textContent = 'Digite o token.'; return; }
+  status.textContent = 'Preparando o backup...';
+  try {
+    const response = await fetch('/api/admin/backup', {method:'POST', headers:{'X-Crawl-Token':token}});
+    if (!response.ok) { status.textContent = response.status === 403 ? 'Token inválido.' : 'Não foi possível gerar o backup (HTTP ' + response.status + ').'; return; }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'busca_vagas_backup.sqlite3';
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    status.textContent = 'Backup gerado. Confira a pasta Downloads do celular.';
+    document.getElementById('token').value = '';
+  } catch (e) { status.textContent = 'Falha de conexão. Tente novamente.'; }
+});
+</script></body></html>""")
+
+
+@app.post("/api/admin/backup")
+def download_database_backup(x_crawl_token: str = Header(default="")):
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="CRAWL_ADMIN_TOKEN não configurado")
+    if x_crawl_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Token inválido")
+    if not Path(DB_PATH).is_file():
+        raise HTTPException(status_code=404, detail="Banco SQLite não encontrado")
+
+    backup_file = tempfile.NamedTemporaryFile(prefix="busca_vagas_", suffix=".sqlite3", delete=False)
+    backup_path = backup_file.name
+    backup_file.close()
+    try:
+        with sqlite3.connect(DB_PATH, timeout=30) as source:
+            with sqlite3.connect(backup_path) as destination:
+                source.backup(destination)
+    except Exception:
+        try:
+            os.unlink(backup_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail="Falha ao criar backup do banco")
+
+    return FileResponse(
+        backup_path,
+        media_type="application/vnd.sqlite3",
+        filename="busca_vagas_backup.sqlite3",
+        background=BackgroundTask(os.unlink, backup_path),
+    )
 
 
 @app.post("/api/admin/crawl")
