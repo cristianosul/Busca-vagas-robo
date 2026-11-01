@@ -571,4 +571,1027 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
 
     for item in data.get("jobs", []):
         url = clean(item.get("absolute_url"))
-        title = clean(item.ge
+        title = clean(item.get("title"))
+
+        if not url or not title:
+            continue
+
+        loc = clean((item.get("location") or {}).get("name"))
+        desc = BeautifulSoup(
+            clean(item.get("content")), "html.parser"
+        ).get_text(" ", strip=True)
+
+        total += 1
+
+        added += upsert({
+            "title": title,
+            "company": slug,
+            "location": loc,
+            "mode": infer_mode(loc + " " + desc),
+            "description": desc,
+            "url": url,
+            "source": "Greenhouse",
+            "date_posted": clean(item.get("updated_at")),
+        })
+
+    return total, added
+
+
+async def lever(client, slug: str) -> tuple[int, int]:
+    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+    data = await fetch_json(client, url)
+
+    if not isinstance(data, list):
+        return 0, 0
+
+    total = added = 0
+
+    for item in data:
+        url = clean(item.get("hostedUrl") or item.get("applyUrl"))
+        title = clean(item.get("text"))
+
+        if not url or not title:
+            continue
+
+        cats = item.get("categories") or {}
+        loc = clean(cats.get("location"))
+
+        desc = BeautifulSoup(
+            clean(item.get("descriptionPlain") or item.get("description")),
+            "html.parser",
+        ).get_text(" ", strip=True)
+
+        total += 1
+
+        added += upsert({
+            "title": title,
+            "company": slug,
+            "location": loc,
+            "mode": infer_mode(loc + " " + desc),
+            "employment_type": clean(cats.get("commitment")),
+            "description": desc,
+            "url": url,
+            "source": "Lever",
+            "date_posted": clean(item.get("createdAt")),
+        })
+
+    return total, added
+
+
+async def ashby(client, slug: str) -> tuple[int, int]:
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+    data = await fetch_json(client, url)
+
+    if not isinstance(data, dict):
+        return 0, 0
+
+    total = added = 0
+
+    for item in data.get("jobs", []):
+        if item.get("isListed") is False:
+            continue
+
+        title = clean(item.get("title"))
+        url = clean(item.get("jobUrl") or item.get("applyUrl"))
+
+        if not title or not url or not url.startswith(("http://", "https://")):
+            continue
+
+        loc = clean(item.get("location"))
+        workplace = clean(item.get("workplaceType"))
+
+        if item.get("isRemote") is True:
+            workplace += " Remote"
+
+        desc = BeautifulSoup(
+            clean(item.get("descriptionPlain") or item.get("descriptionHtml")),
+            "html.parser",
+        ).get_text(" ", strip=True)
+
+        total += 1
+
+        added += upsert({
+            "title": title,
+            "company": clean(item.get("department")) or slug,
+            "location": loc,
+            "mode": infer_mode(loc + " " + workplace),
+            "employment_type": clean(item.get("employmentType")),
+            "salary": "",
+            "description": desc,
+            "url": url,
+            "source": "Ashby",
+            "date_posted": clean(item.get("publishedAt")),
+            "valid_through": "",
+        })
+
+    return total, added
+
+
+async def smartrecruiters(
+    client: httpx.AsyncClient,
+    slug: str,
+    max_pages: int = 5,
+) -> tuple[int, int]:
+    base_url = (
+        f"https://api.smartrecruiters.com/v1/"
+        f"companies/{slug}/postings"
+    )
+
+    total = 0
+    added = 0
+    limit = 100
+
+    for page in range(max_pages):
+        response = await client.get(
+            base_url,
+            params={
+                "limit": limit,
+                "offset": page * limit,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, dict):
+            break
+
+        items = data.get("content", [])
+
+        if not isinstance(items, list) or not items:
+            break
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            title = clean(item.get("name"))
+            posting_id = clean(item.get("id"))
+
+            if not title or not posting_id:
+                continue
+
+            company_data = item.get("company") or {}
+            company = (
+                clean(company_data.get("name"))
+                if isinstance(company_data, dict)
+                else ""
+            ) or slug
+
+            loc_data = item.get("location") or {}
+
+            if isinstance(loc_data, dict):
+                location = ", ".join(
+                    clean(loc_data.get(key))
+                    for key in ("city", "region", "country")
+                    if clean(loc_data.get(key))
+                )
+                is_remote = loc_data.get("remote") is True
+            else:
+                location = clean(loc_data)
+                is_remote = False
+
+            employment = item.get("typeOfEmployment") or {}
+
+            if isinstance(employment, dict):
+                employment_type = clean(
+                    employment.get("label")
+                )
+            else:
+                employment_type = clean(employment)
+
+            if is_remote:
+                mode = "Remoto"
+            else:
+                mode = infer_mode(location)
+
+            url = (
+                clean(item.get("postingUrl"))
+                or clean(item.get("applyUrl"))
+                or f"https://jobs.smartrecruiters.com/{slug}/{posting_id}"
+            )
+
+            if not url.startswith(("http://", "https://")):
+                continue
+
+            total += 1
+
+            added += upsert({
+                "title": title,
+                "company": company,
+                "location": location,
+                "mode": mode,
+                "employment_type": employment_type,
+                "description": "",
+                "url": url,
+                "source": "SmartRecruiters",
+                "date_posted": clean(item.get("releasedDate")),
+            })
+
+        if len(items) < limit:
+            break
+
+        await asyncio.sleep(0.2)
+
+    return total, added
+    
+
+async def crawl_page(client, url: str, source: str) -> tuple[int, int]:
+    try:
+        response = await client.get(url, follow_redirects=True)
+
+        if response.status_code >= 400:
+            return 0, 0
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        found = []
+
+        for tag in soup.find_all("script", type="application/ld+json"):
+            try:
+                found.extend(
+                    extract_jobposting(
+                        json.loads(tag.string or tag.get_text()),
+                        str(response.url),
+                        source,
+                    )
+                )
+            except Exception:
+                continue
+
+        return len(found), sum(upsert(job) for job in found)
+
+    except Exception:
+        return 0, 0
+
+
+async def crawl_sitemap(
+    client, sitemap_url: str, limit: int
+) -> tuple[int, int]:
+    try:
+        response = await client.get(sitemap_url, follow_redirects=True)
+
+        if response.status_code >= 400:
+            return 0, 0
+
+        soup = BeautifulSoup(response.text, "xml")
+        urls = [x.get_text(strip=True) for x in soup.find_all("loc")]
+
+        if soup.find("sitemapindex"):
+            total = added = 0
+
+            for child in urls[:min(limit, 10)]:
+                t, a = await crawl_sitemap(client, child, limit)
+                total += t
+                added += a
+
+            return total, added
+
+        total = added = 0
+
+        for page in urls[:limit]:
+            t, a = await crawl_page(client, page, sitemap_url)
+            total += t
+            added += a
+            await asyncio.sleep(0.15)
+
+        return total, added
+
+    except Exception:
+        return 0, 0
+
+async def gupy(
+    client: httpx.AsyncClient,
+    keyword: str,
+    limit: int = 50,
+) -> tuple[int, int]:
+    base_url = "https://portal.gupy.io/api/job-search/jobs"
+    total = 0
+    added = 0
+    seen_urls = set()
+
+    # Busca até 5 páginas de resultados por palavra-chave.
+    page_size = max(1, min(limit, 50))
+    max_pages = 5
+
+    try:
+        for page in range(max_pages):
+            response = await client.get(
+                base_url,
+                params={
+                    "jobName": keyword,
+                    "limit": page_size,
+                    "offset": page * page_size,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if not isinstance(data, dict):
+                break
+
+            items = data.get("data", [])
+
+            if not isinstance(items, list) or not items:
+                break
+
+            page_valid = 0
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                title = clean(item.get("name"))
+                url = clean(item.get("jobUrl")).split("#")[0]
+
+                if (
+                    not title
+                    or not url.startswith(("http://", "https://"))
+                    or url in seen_urls
+                ):
+                    continue
+
+                seen_urls.add(url)
+
+                company = (
+                    clean(item.get("careerPageName")) or "Empresa"
+                )
+
+                city_value = item.get("city")
+                state_value = item.get("state")
+
+                city = clean(
+                    city_value.get("name")
+                    if isinstance(city_value, dict)
+                    else city_value
+                )
+                state = clean(
+                    state_value.get("name")
+                    if isinstance(state_value, dict)
+                    else state_value
+                )
+
+                location = ", ".join(
+                    value for value in (city, state) if value
+                )
+
+                if not location:
+                    location = location_text(item.get("address"))
+
+                description = BeautifulSoup(
+                    clean(item.get("description")),
+                    "html.parser",
+                ).get_text(" ", strip=True)
+
+                workplace = clean(
+                    item.get("workplaceType")
+                ).lower()
+
+                if workplace in (
+                    "on-site", "onsite", "on_site", "presencial"
+                ):
+                    mode = "Presencial"
+                elif workplace in ("hybrid", "híbrido", "hibrido"):
+                    mode = "Híbrido"
+                elif workplace in (
+                    "remote", "remoto", "telecommute"
+                ):
+                    mode = "Remoto"
+                else:
+                    mode = infer_mode(
+                        location + " " + description
+                    )
+
+                total += 1
+                page_valid += 1
+
+                added += upsert({
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "mode": mode,
+                    "description": description,
+                    "url": url,
+                    "source": "Gupy",
+                    "date_posted": clean(
+                        item.get("publishedDate")
+                    ),
+                    "valid_through": clean(
+                        item.get("applicationDeadline")
+                    ),
+                })
+
+            # Evita novas requisições quando a página não
+            # contém anúncios válidos.
+            if len(items) < page_size:
+                break
+
+            await asyncio.sleep(0.2)
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Gupy ({keyword}): {str(e)[:150]}"
+        ) from e
+
+    return total, added
+
+def import_fgtas_jobs() -> dict:
+    """Importa vagas do painel FGTAS/SINE para o SQLite."""
+
+    result = {
+        "jobs_seen": 0,
+        "jobs_added": 0,
+        "errors": []
+    }
+
+    if not FGTAS_DATA_PATH.exists():
+        result["errors"].append(
+            f"Arquivo FGTAS não encontrado: "
+            f"{FGTAS_DATA_PATH.name}"
+        )
+        return result
+
+    try:
+        payload = json.loads(
+            FGTAS_DATA_PATH.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(payload, dict):
+            raise ValueError("Formato JSON inválido.")
+
+        items = payload.get("items", [])
+
+        if not isinstance(items, list):
+            raise ValueError("A lista de vagas é inválida.")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            code = clean(item.get("source_id"))
+            title = clean(item.get("title"))
+
+            if not code or not title:
+                continue
+
+            details = [
+                f"Código da vaga FGTAS/SINE: {code}"
+            ]
+
+            description = clean(item.get("description"))
+            instructions = clean(
+                item.get("application_instructions")
+            )
+
+            if description:
+                details.append(description)
+
+            if instructions:
+                details.append(
+                    "COMO SE CANDIDATAR: " + instructions
+                )
+
+            if item.get("pcd_exclusive"):
+                details.append(
+                    "Vaga exclusiva para pessoa com deficiência (PCD)."
+                )
+
+            if item.get("no_experience_required"):
+                details.append(
+                    "Não exige experiência, conforme publicação."
+                )
+
+            url = (
+                "https://www.fgtas.rs.gov.br/?vaga=" + code
+            )
+
+            result["jobs_seen"] += 1
+
+            result["jobs_added"] += upsert({
+                "title": title,
+                "company": (
+                    clean(item.get("company"))
+                    or "Confidencial"
+                ),
+                "location": (
+                    clean(item.get("location"))
+                    or "Caxias do Sul, RS"
+                ),
+                "mode": (
+                    clean(item.get("mode"))
+                    or "Presencial"
+                ),
+                "employment_type": clean(
+                    item.get("employment_type")
+                ),
+                "salary": clean(item.get("salary")),
+                "description": " | ".join(details),
+                "url": url,
+                "source": (
+                    clean(item.get("source"))
+                    or "FGTAS/SINE Caxias do Sul"
+                ),
+                "date_posted": (
+                    clean(item.get("publication_date"))
+                    or clean(payload.get("publication_date"))
+                ),
+                "valid_through":clean(item.get("valid_through")),
+            })
+
+    except Exception as exc:
+        result["errors"].append(
+            f"Importação FGTAS: {str(exc)[:180]}"
+        )
+
+    return result
+    
+async def run_crawl() -> dict:
+    global CRAWL_METRICS
+    CRAWL_METRICS = {"duplicates": 0}
+    cfg = config()
+
+    stats = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "sources_checked": 0,
+        "jobs_seen": 0,
+        "jobs_added": 0,
+        "duplicates": 0,
+        "expired_jobs": 0,
+        "errors": [],
+    }
+
+    headers = {
+        "User-Agent": cfg.get(
+            "user_agent", DEFAULT_CONFIG["user_agent"]
+        )
+    }
+
+    async with httpx.AsyncClient(
+        timeout=float(cfg.get("request_timeout_seconds", 20)),
+        headers=headers,
+    ) as client:
+
+        for slug in cfg.get("greenhouse_boards", []):
+            try:
+                t, a = await greenhouse(client, slug)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"Greenhouse {slug}: nenhum registro retornado."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Greenhouse {slug}: {str(e)[:180]}"
+                )
+
+        for slug in cfg.get("lever_sites", []):
+            try:
+                t, a = await lever(client, slug)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"Lever {slug}: nenhum registro retornado."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Lever {slug}: {str(e)[:180]}"
+                )
+
+        for slug in cfg.get("ashby_boards", []):
+            try:
+                t, a = await ashby(client, slug)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"Ashby {slug}: nenhum registro retornado; "
+                        "confira o identificador do quadro."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Ashby {slug}: {str(e)[:180]}"
+                )
+        
+        for slug in cfg.get("smartrecruiters_companies", []):
+            try:
+                t, a = await smartrecruiters(
+                    client,
+                    slug,
+                    max_pages=min(
+                        5,
+                        int(cfg.get("max_pages_per_source", 30))
+                    ),
+                )
+
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+                if t == 0:
+                    stats["errors"].append(
+                        f"SmartRecruiters {slug}: nenhum registro retornado; "
+                        "confira o identificador da empresa."
+                    )
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"SmartRecruiters {slug}: {str(e)[:180]}"
+                )
+
+        for keyword in [
+             "auxiliar",
+             "analista",
+             "assistente",
+             "vendedor",
+             "operador",
+             "estágio",
+             "jovem aprendiz",
+             "atendente",
+             "administrativo",
+             "financeiro",
+             "recursos humanos",
+             "logística",
+             "produção",
+             "técnico",
+             "engenheiro",
+             "desenvolvedor",
+             "marketing",
+             "motorista",
+             "estoquista",
+             "recepcionista",
+        ]:
+            try:
+                t, a = await gupy(client, keyword, 50)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(str(e)[:180])
+        
+        for url in cfg.get("jsonld_seed_urls", []):
+            try:
+                t, a = await crawl_page(client, url, "Página pública")
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Página pública: {str(e)[:180]}"
+                )
+
+        for item in cfg.get("additional_sources", []):
+            if isinstance(item, str):
+                url, name = item, "Página pública"
+
+            elif isinstance(item, dict):
+                url = clean(item.get("url"))
+                name = clean(
+                    item.get("name") or item.get("source")
+                ) or "Página pública"
+
+            else:
+                stats["errors"].append(
+                    "Fonte adicional ignorada: formato inválido"
+                )
+                continue
+
+            if not url.startswith(("http://", "https://")):
+                stats["errors"].append(
+                    "Fonte adicional inválida: URL ausente ou inválida."
+                )
+                continue
+
+            try:
+                t, a = await crawl_page(client, url, name)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Fonte adicional {name}: {str(e)[:180]}"
+                )
+
+        for url in cfg.get("sitemap_urls", []):
+            try:
+                t, a = await crawl_sitemap(
+                    client,
+                    url,
+                    int(cfg.get("max_pages_per_source", 30)),
+                )
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+
+            except Exception as e:
+                stats["errors"].append(
+                    f"Sitemap: {str(e)[:180]}"
+                )
+
+        expired = deactivate_expired_jobs()
+
+    # Valida apenas um lote por execução para não sobrecarregar as fontes.
+    # Respostas 404/410 são sinalizadas, mas nunca removem a vaga automaticamente.
+    try:
+        stats["link_check"] = await check_application_links(200)
+    except Exception as exc:
+        stats["link_check"] = {"checked": 0, "errors": 1}
+        stats["errors"].append(
+            f"Validação de links: {str(exc)[:160]}"
+        )
+
+    stats["expired_jobs"] = expired
+    stats["duplicates"] = CRAWL_METRICS["duplicates"]
+    CRAWL_METRICS = None
+    stats["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    with db() as con:
+        con.execute("""
+            INSERT INTO crawl_runs (
+                started_at, finished_at, sources_checked,
+                jobs_seen, jobs_added, errors, duplicates, expired_jobs
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            stats["started_at"],
+            stats["finished_at"],
+            stats["sources_checked"],
+            stats["jobs_seen"],
+            stats["jobs_added"],
+            json.dumps(stats["errors"], ensure_ascii=False),
+            stats["duplicates"],
+            stats["expired_jobs"],
+        ))
+
+    return stats
+
+
+async def scheduler():
+    import logging
+
+    logger = logging.getLogger("uvicorn.error")
+
+    while True:
+        try:
+            logger.info("ROBÔ: iniciando coleta automática.")
+            result = await run_crawl()
+
+            logger.info(
+                "ROBÔ: coleta concluída. "
+                f"Fontes verificadas: {result['sources_checked']}; "
+                f"Vagas encontradas: {result['jobs_seen']}; "
+                f"Novas vagas: {result['jobs_added']}; "
+                f"Duplicadas: {result['duplicates']}; "
+                f"Expiradas desativadas: {result['expired_jobs']}; "
+                f"Erros: {len(result['errors'])}"
+            )
+
+            for error in result["errors"]:
+                logger.warning("ROBÔ - FONTE: %s", error)
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            logger.exception("ROBÔ: falha na coleta automática.")
+
+        await asyncio.sleep(
+            max(
+                15,
+                int(config().get("scan_interval_minutes", 360)) * 60,
+            )
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+
+    imported = import_fgtas_jobs()
+
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+
+    logger.info(
+        "FGTAS/SINE: registros lidos=%s; "
+        "novas vagas=%s; erros=%s",
+        imported["jobs_seen"],
+        imported["jobs_added"],
+        len(imported["errors"])
+    )
+
+    for error in imported["errors"]:
+        logger.warning("FGTAS/SINE: %s", error)
+
+    task = asyncio.create_task(scheduler())
+
+    yield
+
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+        
+
+app = FastAPI(
+    title="Busca Vagas API",
+    version="0.4.0",
+    lifespan=lifespan,
+)
+
+
+@app.get("/")
+def home():
+    return FileResponse(BASE / "index.html")
+
+
+@app.get("/api/health")
+def health():
+    with db() as con:
+        count = con.execute(
+            "SELECT COUNT(*) FROM jobs WHERE active=1 AND (valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
+        ).fetchone()[0]
+
+        last = con.execute("""
+            SELECT finished_at, jobs_seen, jobs_added,
+                   duplicates, expired_jobs, sources_checked, errors
+            FROM crawl_runs
+            ORDER BY id DESC LIMIT 1
+        """).fetchone()
+
+    return {
+        "status": "ok",
+        "active_jobs": count,
+        "last_crawl": dict(last) if last else None,
+    }
+
+
+@app.get("/api/jobs")
+def jobs(
+    q: str = "",
+    location: str = "",
+    mode: str = "",
+    state: str = "",
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    terms, args = [
+    "active=1",
+    "(valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
+], []
+
+    if q.strip():
+        terms.append(
+            "(title LIKE ? OR company LIKE ? OR description LIKE ?)"
+        )
+        like = "%" + q.strip() + "%"
+        args.extend([like, like, like])
+
+    
+    if location.strip().lower() in ("brasil", "brazil"):
+        brazil_patterns = [
+            "%Brasil%", "%Brazil%",
+            "%São Paulo%", "%Rio de Janeiro%",
+            "%Belo Horizonte%", "%Brasília%",
+            "%Curitiba%", "%Porto Alegre%",
+            "%Florianópolis%", "%Caxias do Sul%",
+            "%Salvador%", "%Recife%",
+            "%Fortaleza%", "%Goiânia%",
+            "%Manaus%", "%Campinas%",
+            "%Minas Gerais%", "%Rio Grande do Sul%",
+            "%Santa Catarina%", "%Paraná%",
+            "%Bahia%", "%Pernambuco%",
+            "%Ceará%", "%Espírito Santo%",
+            "%Goiás%", "%Amazonas%",
+            "%Mato Grosso%", "%Mato Grosso do Sul%",
+            "%Pará%", "%Paraíba%", "%Sergipe%",
+            "%Alagoas%", "%Amapá%", "%Acre%",
+            "%Rondônia%", "%Roraima%", "%Tocantins%",
+            "%Maranhão%", "%Piauí%",
+            "%Rio Grande do Norte%"
+        ]
+
+        location_conditions = " OR ".join(
+            ["location LIKE ?" for _ in brazil_patterns]
+        )
+
+        terms.append(
+            "(" + location_conditions +
+            " OR (mode = 'Remoto' AND ("
+            "description LIKE '%Brazil%' OR "
+            "description LIKE '%Brasil%' OR "
+            "description LIKE '%worldwide%' OR "
+            "description LIKE '%anywhere in the world%'"
+            ")))"
+        )
+        args.extend(brazil_patterns)
+
+    else:
+        if location.strip():
+            terms.append("location LIKE ?")
+            args.append("%" + location.strip() + "%")
+
+        if mode.strip() and mode != "Todas":
+            if mode.strip().lower() in ("hibrido", "híbrido"):
+                terms.append(
+                  "LOWER(REPLACE(mode, 'í', 'i')) = ?"
+                )
+                args.append("hibrido")
+            else:
+                terms.append("LOWER(mode)=LOWER(?)")
+                args.append(mode.strip())  
+    
+        if state.strip():
+            terms.append("location LIKE ?")
+            args.append("%" + state.strip() + "%")
+
+    where = " AND ".join(terms)
+
+
+    with db() as con:
+        total = con.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE {where}", args
+        ).fetchone()[0]
+
+        rows = con.execute(f"""
+            SELECT id, title, company, location, mode,
+                   employment_type, salary, description, url,
+                   source, date_posted, valid_through, first_seen
+            FROM jobs
+            WHERE {where}
+            ORDER BY
+                CASE WHEN TRIM(COALESCE(date_posted, '')) = '' THEN 1 ELSE 0 END,
+                date(date_posted) DESC,
+                first_seen DESC
+            LIMIT ? OFFSET ?
+        """, args + [limit, offset]).fetchall()
+
+    return {
+        "total": total,
+        "items": [dict(row) for row in rows],
+    }
+
+
+@app.get("/api/stats")
+def stats():
+    with db() as con:
+        total = con.execute(
+            "SELECT COUNT(*) FROM jobs WHERE active=1 AND (valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))"
+        ).fetchone()[0]
+
+        sources = con.execute(
+            """SELECT COUNT(DISTINCT source) FROM jobs
+               WHERE active=1
+                 AND (valid_through IS NULL OR TRIM(valid_through)=''
+                      OR date(valid_through) >= date('now'))"""
+        ).fetchone()[0]
+
+        link_rows = con.execute("""
+            SELECT link_status, COUNT(*) AS amount FROM jobs
+            WHERE active=1 AND (valid_through IS NULL OR TRIM(valid_through)=''
+                                OR date(valid_through) >= date('now'))
+            GROUP BY link_status
+        """).fetchall()
+        link_checks = {row["link_status"]: row["amount"] for row in link_rows}
+
+        last = con.execute("""
+            SELECT finished_at, jobs_seen, jobs_added,
+                   sources_checked, duplicates, expired_jobs, errors
+            FROM crawl_runs
+            ORDER BY id DESC LIMIT 1
+        """).fetchone()
+
+    return {
+        "active_jobs": total,
+        "sources": sources,
+        "application_links": {
+            "pending": link_checks.get("pending", 0),
+            "valid": link_checks.get("valid", 0),
+            "broken": link_checks.get("broken", 0),
+            "inconclusive": link_checks.get("inconclusive", 0),
+        },
+        "last_crawl": dict(last) if last else None,
+    }
+
+
+@app.post("/api/admin/crawl")
+async def manual_crawl(x_crawl_token: str = Header(default="")):
+    if ADMIN_TOKEN and x_crawl_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    return await run_crawl()
+
+
+app.mount("/static", StaticFiles(directory=BASE), name="static")
