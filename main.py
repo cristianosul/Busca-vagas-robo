@@ -1754,11 +1754,19 @@ def download_database_backup(x_crawl_token: str = Header(default="")):
         background=BackgroundTask(os.unlink, backup_path),
     )
 
-
 @app.post("/api/admin/crawl")
 async def manual_crawl(x_crawl_token: str = Header(default="")):
-    if ADMIN_TOKEN and x_crawl_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Token inválido")
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Token administrativo não configurado"
+        )
+
+    if x_crawl_token != ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail="Token inválido"
+        )
 
     return await run_crawl()
 
