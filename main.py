@@ -41,6 +41,18 @@ DEFAULT_CONFIG = {
     "jsonld_seed_urls": [],
     "sitemap_urls": [],
     "additional_sources": [],
+    "gupy_keywords": [
+        "auxiliar", "analista", "assistente", "vendedor", "operador",
+        "estágio", "jovem aprendiz", "atendente", "administrativo",
+        "financeiro", "recursos humanos", "logística", "produção",
+        "técnico", "engenheiro", "desenvolvedor", "marketing",
+        "motorista", "estoquista", "recepcionista", " serviços gerais",
+        "conferente", " ajudante", "consultor", "supervisor",
+        "coordenador", "gerente", "mecânico", "eletricista",
+        "vigilante", "farmacêutico", "enfermeiro", "vendedor externo",
+        "promotor", "auxiliar de limpeza", "auxiliar de cozinha",
+        "operador de caixa", "pessoa com deficiência", "aprendiz"
+    ],
 }
 
 
@@ -342,7 +354,7 @@ def normalized_text(value: Any) -> str:
     value = unicodedata.normalize("NFKD", clean(value).lower())
     value = "".join(ch for ch in value if not unicodedata.combining(ch))
     value = re.sub(r"[^a-z0-9]+", " ", value)
-    return re.sub(r"\\s+", " ", value).strip()
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def valid_http_url(value: Any) -> bool:
@@ -994,115 +1006,91 @@ async def gupy(
     return total, added
 
 def import_fgtas_jobs() -> dict:
-    """Importa vagas do painel FGTAS/SINE para o SQLite."""
+    """Importa arquivos locais de vagas FGTAS/SINE de vários municípios.
 
-    result = {
-        "jobs_seen": 0,
-        "jobs_added": 0,
-        "errors": []
-    }
+    Cada arquivo fgtas_sine_*.json deve conter um objeto com "items" (lista
+    de vagas). A cidade pode ser informada no campo "city" do arquivo ou no
+    campo "location" de cada vaga. Nenhuma vaga/cidade é inventada aqui.
+    """
+    result = {"jobs_seen": 0, "jobs_added": 0, "errors": []}
 
-    if not FGTAS_DATA_PATH.exists():
+    paths = []
+    if FGTAS_DATA_PATH.exists():
+        paths.append(FGTAS_DATA_PATH)
+    paths.extend(path for path in BASE.glob("fgtas_sine_*.json") if path not in paths)
+
+    if not paths:
         result["errors"].append(
-            f"Arquivo FGTAS não encontrado: "
-            f"{FGTAS_DATA_PATH.name}"
+            "Nenhum arquivo fgtas_sine_*.json encontrado para importar."
         )
         return result
 
-    try:
-        payload = json.loads(
-            FGTAS_DATA_PATH.read_text(encoding="utf-8")
-        )
+    for data_path in paths:
+        try:
+            payload = json.loads(data_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Formato JSON inválido.")
+            items = payload.get("items", [])
+            if not isinstance(items, list):
+                raise ValueError("A lista de vagas é inválida.")
 
-        if not isinstance(payload, dict):
-            raise ValueError("Formato JSON inválido.")
-
-        items = payload.get("items", [])
-
-        if not isinstance(items, list):
-            raise ValueError("A lista de vagas é inválida.")
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-
-            code = clean(item.get("source_id"))
-            title = clean(item.get("title"))
-
-            if not code or not title:
-                continue
-
-            details = [
-                f"Código da vaga FGTAS/SINE: {code}"
-            ]
-
-            description = clean(item.get("description"))
-            instructions = clean(
-                item.get("application_instructions")
+            default_city = clean(payload.get("city"))
+            default_state = clean(payload.get("state")) or "RS"
+            default_location = ", ".join(
+                part for part in (default_city, default_state) if part
             )
+            default_source = clean(payload.get("source")) or "FGTAS/SINE"
 
-            if description:
-                details.append(description)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                code = clean(item.get("source_id"))
+                title = clean(item.get("title"))
+                if not code or not title:
+                    continue
 
-            if instructions:
-                details.append(
-                    "COMO SE CANDIDATAR: " + instructions
+                details = [f"Código da vaga FGTAS/SINE: {code}"]
+                description = clean(item.get("description"))
+                instructions = clean(item.get("application_instructions"))
+                if description:
+                    details.append(description)
+                if instructions:
+                    details.append("COMO SE CANDIDATAR: " + instructions)
+                if item.get("pcd_exclusive"):
+                    details.append("Vaga exclusiva para pessoa com deficiência (PCD).")
+                if item.get("no_experience_required"):
+                    details.append("Não exige experiência, conforme publicação.")
+
+                url = clean(item.get("url")) or (
+                    "https://www.fgtas.rs.gov.br/?vaga=" + code
                 )
+                if not valid_http_url(url):
+                    result["errors"].append(
+                        f"{data_path.name}: URL inválida para vaga {code}."
+                    )
+                    continue
 
-            if item.get("pcd_exclusive"):
-                details.append(
-                    "Vaga exclusiva para pessoa com deficiência (PCD)."
-                )
-
-            if item.get("no_experience_required"):
-                details.append(
-                    "Não exige experiência, conforme publicação."
-                )
-
-            url = (
-                "https://www.fgtas.rs.gov.br/?vaga=" + code
+                result["jobs_seen"] += 1
+                result["jobs_added"] += upsert({
+                    "title": title,
+                    "company": clean(item.get("company")) or "Confidencial",
+                    "location": clean(item.get("location")) or default_location or "Rio Grande do Sul",
+                    "mode": clean(item.get("mode")) or "Presencial",
+                    "employment_type": clean(item.get("employment_type")),
+                    "salary": clean(item.get("salary")),
+                    "description": " | ".join(details),
+                    "url": url,
+                    "source": clean(item.get("source")) or default_source,
+                    "date_posted": clean(item.get("publication_date")) or clean(payload.get("publication_date")),
+                    "valid_through": clean(item.get("valid_through")),
+                })
+        except Exception as exc:
+            result["errors"].append(
+                f"{data_path.name}: {str(exc)[:180]}"
             )
-
-            result["jobs_seen"] += 1
-
-            result["jobs_added"] += upsert({
-                "title": title,
-                "company": (
-                    clean(item.get("company"))
-                    or "Confidencial"
-                ),
-                "location": (
-                    clean(item.get("location"))
-                    or "Caxias do Sul, RS"
-                ),
-                "mode": (
-                    clean(item.get("mode"))
-                    or "Presencial"
-                ),
-                "employment_type": clean(
-                    item.get("employment_type")
-                ),
-                "salary": clean(item.get("salary")),
-                "description": " | ".join(details),
-                "url": url,
-                "source": (
-                    clean(item.get("source"))
-                    or "FGTAS/SINE Caxias do Sul"
-                ),
-                "date_posted": (
-                    clean(item.get("publication_date"))
-                    or clean(payload.get("publication_date"))
-                ),
-                "valid_through":clean(item.get("valid_through")),
-            })
-
-    except Exception as exc:
-        result["errors"].append(
-            f"Importação FGTAS: {str(exc)[:180]}"
-        )
 
     return result
-    
+
 async def run_crawl() -> dict:
     global CRAWL_METRICS
     CRAWL_METRICS = {"duplicates": 0}
@@ -1207,28 +1195,13 @@ async def run_crawl() -> dict:
                     f"SmartRecruiters {slug}: {str(e)[:180]}"
                 )
 
-        for keyword in [
-             "auxiliar",
-             "analista",
-             "assistente",
-             "vendedor",
-             "operador",
-             "estágio",
-             "jovem aprendiz",
-             "atendente",
-             "administrativo",
-             "financeiro",
-             "recursos humanos",
-             "logística",
-             "produção",
-             "técnico",
-             "engenheiro",
-             "desenvolvedor",
-             "marketing",
-             "motorista",
-             "estoquista",
-             "recepcionista",
-        ]:
+        gupy_keywords = cfg.get("gupy_keywords", DEFAULT_CONFIG["gupy_keywords"])
+        if not isinstance(gupy_keywords, list):
+            gupy_keywords = DEFAULT_CONFIG["gupy_keywords"]
+
+        for keyword in dict.fromkeys(
+            clean(term) for term in gupy_keywords if clean(term)
+        ):
             try:
                 t, a = await gupy(client, keyword, 50)
                 stats["sources_checked"] += 1
