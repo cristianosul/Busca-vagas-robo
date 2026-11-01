@@ -1,4 +1,3 @@
-
 {
   "scan_interval_minutes": 360,
   "max_pages_per_source": 30,
@@ -11,11 +10,11 @@
   ],
   "ashby_boards": [],
   "smartrecruiters_companies": [
-  "Experian",
-  "Expeditors",
-  "Continental",
-  "AFRY"
-],
+    "Experian",
+    "Expeditors",
+    "Continental",
+    "AFRY"
+  ],
   "jsonld_seed_urls": [],
   "sitemap_urls": [],
   "additional_sources": [
@@ -23,5 +22,45 @@
       "url": "https://cacaushow-industria.gupy.io/job/eyJqb2JJZCI6MTI3NzkxNTQsInNvdXJjZSI6Imd1cHlfcG9ydGFsIn0=?jobBoardSource=gupy_portal",
       "name": "Gupy - Cacau Show"
     }
+  ],
+  "gupy_keywords": [
+    "auxiliar",
+    "analista",
+    "assistente",
+    "vendedor",
+    "operador",
+    "estágio",
+    "jovem aprendiz",
+    "atendente",
+    "administrativo",
+    "financeiro",
+    "recursos humanos",
+    "logística",
+    "produção",
+    "técnico",
+    "engenheiro",
+    "desenvolvedor",
+    "marketing",
+    "motorista",
+    "estoquista",
+    "recepcionista",
+    "serviços gerais",
+    "conferente",
+    "ajudante",
+    "consultor",
+    "supervisor",
+    "coordenador",
+    "gerente",
+    "mecânico",
+    "eletricista",
+    "vigilante",
+    "farmacêutico",
+    "enfermeiro",
+    "vendedor externo",
+    "promotor",
+    "auxiliar de limpeza",
+    "auxiliar de cozinha",
+    "operador de caixa",
+    "aprendiz"
   ]
 }
