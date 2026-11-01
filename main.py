@@ -1345,16 +1345,7 @@ async def scheduler():
         try:
             logger.info("ROBÔ: iniciando coleta automática.")
             result = await run_crawl()
-            link_result = result.get("link_check", {})
 
-            logger.info(
-                "VALIDAÇÃO DE LINKS: "
-                f"Verificados: {link_result.get('checked', 0)}; "
-                f"Válidos: {link_result.get('valid', 0)}; "
-                f"Quebrados: {link_result.get('broken', 0)}; "
-                f"Inconclusivos: {link_result.get('inconclusive', 0)}; "
-                f"Erros: {link_result.get('errors', 0)}"
-)
             logger.info(
                 "ROBÔ: coleta concluída. "
                 f"Fontes verificadas: {result['sources_checked']}; "
@@ -1537,12 +1528,20 @@ def jobs(
         rows = con.execute(f"""
             SELECT id, title, company, location, mode,
                    employment_type, salary, description, url,
-                   source, date_posted, valid_through, first_seen
+                   source, date_posted, valid_through, first_seen,
+                   COALESCE(NULLIF(link_status, ''), 'pending') AS link_status
             FROM jobs
             WHERE {where}
             ORDER BY
                 CASE WHEN TRIM(COALESCE(date_posted, '')) = '' THEN 1 ELSE 0 END,
                 date(date_posted) DESC,
+                CASE COALESCE(NULLIF(link_status, ''), 'pending')
+                    WHEN 'valid' THEN 0
+                    WHEN 'inconclusive' THEN 1
+                    WHEN 'pending' THEN 2
+                    WHEN 'broken' THEN 3
+                    ELSE 2
+                END,
                 first_seen DESC
             LIMIT ? OFFSET ?
         """, args + [limit, offset]).fetchall()
