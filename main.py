@@ -208,9 +208,20 @@ def init_db():
             )
         """)
 
+        # Garante geração automática do ID.
+        con.execute("CREATE SEQUENCE IF NOT EXISTS crawl_runs_id_seq")
+
         con.execute("""
-            ALTER TABLE crawl_runs
-            ALTER COLUMN id SET DEFAULT nextval('crawl_runs_id_seq')
+            SELECT setval(
+                'crawl_runs_id_seq',
+                GREATEST(COALESCE((SELECT MAX(id) FROM crawl_runs), 0) + 1, 1),
+                false
+            )
+        """)
+
+        con.execute("""
+            ALTER SEQUENCE crawl_runs_id_seq
+            OWNED BY crawl_runs.id
         """)
 
         con.execute("""
