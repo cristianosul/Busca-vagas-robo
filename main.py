@@ -223,12 +223,9 @@ def init_db():
             ALTER SEQUENCE crawl_runs_id_seq
             OWNED BY crawl_runs.id
         """)
-
-        con.execute("""
-            ALTER SEQUENCE crawl_runs_id_seq
-            OWNED BY crawl_runs.id
-        """)
         
+        # A coluna IDENTITY já gera os IDs automaticamente.
+        # Não é necessário criar ou alterar sequências manualmente.
         # Migrações compatíveis: preservam todos os registros já existentes.
         run_columns = {
             row["name"] for row in con.execute("""SELECT column_name AS name FROM information_schema.columns
