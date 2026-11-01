@@ -140,9 +140,9 @@ def db():
     return DatabaseConnection()
 
 
-def init_db():
+def init_db():        
     with db() as con:
-         con.execute("""
+        con.execute("""
             CREATE OR REPLACE FUNCTION safe_job_date(value TEXT)
             RETURNS DATE
             LANGUAGE plpgsql
