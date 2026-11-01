@@ -90,10 +90,17 @@ class HybridRow(Mapping):
         return len(self._keys)
 
 
+
 def hybrid_row(cursor):
+    # Comandos SQL sem retorno de colunas.
+    if cursor.description is None:
+        return lambda values: values
+
     names = [column.name for column in cursor.description]
+
     def make(values):
         return HybridRow(dict(zip(names, values)))
+
     return make
 
 
