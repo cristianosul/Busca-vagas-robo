@@ -91,9 +91,14 @@ class HybridRow(Mapping):
 
 
 def hybrid_row(cursor):
+    if cursor.description is None:
+        return lambda values: values
+
     names = [column.name for column in cursor.description]
+
     def make(values):
         return HybridRow(dict(zip(names, values)))
+
     return make
 
 
