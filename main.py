@@ -554,7 +554,8 @@ def upsert(job: dict) -> bool:
             match = con.execute("""
                 SELECT id FROM jobs
                 WHERE canonical_key=?
-                  AND first_seen >= datetime('now', '-45 days')
+                    AND first_seen::timestamptz >=
+                      CURRENT_TIMESTAMP - INTERVAL '45 days'
                 ORDER BY first_seen DESC
                 LIMIT 1
             """, (canonical_key,)).fetchone()
