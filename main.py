@@ -1345,7 +1345,16 @@ async def scheduler():
         try:
             logger.info("ROBÔ: iniciando coleta automática.")
             result = await run_crawl()
+            link_result = result.get("link_check", {})
 
+            logger.info(
+                "VALIDAÇÃO DE LINKS: "
+                f"Verificados: {link_result.get('checked', 0)}; "
+                f"Válidos: {link_result.get('valid', 0)}; "
+                f"Quebrados: {link_result.get('broken', 0)}; "
+                f"Inconclusivos: {link_result.get('inconclusive', 0)}; "
+                f"Erros: {link_result.get('errors', 0)}"
+)
             logger.info(
                 "ROBÔ: coleta concluída. "
                 f"Fontes verificadas: {result['sources_checked']}; "
