@@ -142,17 +142,25 @@ def db():
 
 def init_db():
     with db() as con:
-        con.execute("""
+         con.execute("""
             CREATE OR REPLACE FUNCTION safe_job_date(value TEXT)
             RETURNS DATE
-            LANGUAGE SQL
+            LANGUAGE plpgsql
             IMMUTABLE
             AS $$
-                SELECT CASE
-                    WHEN LEFT(value, 10) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-                    THEN LEFT(value, 10)::DATE
-                    ELSE NULL
-                END
+            BEGIN
+                IF value IS NULL
+                   OR LEFT(BTRIM(value), 10) !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                THEN
+                    RETURN NULL;
+                END IF;
+
+                RETURN LEFT(BTRIM(value), 10)::DATE;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    RETURN NULL;
+            END;
             $$
         """)
         con.execute("""
@@ -211,10 +219,6 @@ def init_db():
             con.execute("""
                 ALTER TABLE crawl_runs
                 ALTER COLUMN id SET DEFAULT nextval('crawl_runs_legacy_id_seq')
-            """)
-            con.execute("""
-                ALTER SEQUENCE crawl_runs_legacy_id_seq
-                OWNED BY crawl_runs.id
             """)
 
         # Migrações compatíveis: preservam todos os registros já existentes.
