@@ -195,10 +195,11 @@ def init_db():
                 errors TEXT
             )
         """)
+        
         # Garante geração automática do ID também na tabela importada do SQLite.
         con.execute("CREATE SEQUENCE IF NOT EXISTS crawl_runs_id_seq")
 
-        # A tabela pode já existir sem IDENTITY, pois os registros foram importados.
+        # Ajusta a sequência para continuar após o último registro existente.
         con.execute("""
             SELECT setval(
                 'crawl_runs_id_seq',
@@ -206,33 +207,17 @@ def init_db():
                 false
             )
         """)
+
         con.execute("""
             ALTER TABLE crawl_runs
             ALTER COLUMN id SET DEFAULT nextval('crawl_runs_id_seq')
         """)
+
         con.execute("""
             ALTER SEQUENCE crawl_runs_id_seq
             OWNED BY crawl_runs.id
         """)
         
-""")
-        # A tabela pode já existir sem IDENTITY, pois os registros foram importados.
-        con.execute("""
-            SELECT setval(
-                'crawl_runs_id_seq',
-                GREATEST(COALESCE((SELECT MAX(id) FROM crawl_runs), 0) + 1, 1),
-                false
-            )
-        """)
-        con.execute("""
-            ALTER TABLE crawl_runs
-            ALTER COLUMN id SET DEFAULT nextval('crawl_runs_id_seq')
-        """)
-        con.execute("""
-            ALTER SEQUENCE crawl_runs_id_seq
-            OWNED BY crawl_runs.id
-        """)
-
         # Migrações compatíveis: preservam todos os registros já existentes.
         run_columns = {
             row["name"] for row in con.execute("""SELECT column_name AS name FROM information_schema.columns
