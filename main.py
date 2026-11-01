@@ -213,7 +213,6 @@ con.execute("""
     OWNED BY crawl_runs.id
 """)
         # A tabela pode já existir sem IDENTITY, pois os registros foram importados.
-        con.execute("CREATE SEQUENCE IF NOT EXISTS crawl_runs_id_seq")
         con.execute("""
             SELECT setval(
                 'crawl_runs_id_seq',
