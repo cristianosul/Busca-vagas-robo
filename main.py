@@ -620,10 +620,13 @@ async def check_application_links(batch_size: int = 200) -> dict:
     with db() as con:
         rows = con.execute("""
             SELECT id, url FROM jobs
-            WHERE active=1 AND (
+            WHERE active=1
+              AND url NOT ILIKE '%fgtas.invalid%'
+              AND NOT (source ILIKE '%FGTAS%' AND url ILIKE '%?vaga=%')
+              AND (
                 link_status='pending' OR link_checked_at=''
                 OR link_checked_at < ?
-            )
+              )
             ORDER BY CASE WHEN link_status='pending' THEN 0 ELSE 1 END,
                      COALESCE(date_posted, first_seen) DESC
             LIMIT ?
@@ -1183,9 +1186,13 @@ def import_fgtas_jobs() -> dict:
                 if item.get("no_experience_required"):
                     details.append("Não exige experiência, conforme publicação.")
 
-                url = clean(item.get("url")) or (
-                    "https://www.fgtas.rs.gov.br/?vaga=" + code
-                )
+                # O arquivo FGTAS/SINE pode não trazer link individual de candidatura.
+                # Nesse caso, usa um identificador interno .invalid apenas para deduplicação;
+                # ele nunca será exibido como link clicável nem submetido à checagem HTTP.
+                url = clean(item.get("application_url")) or clean(item.get("url"))
+                if not url:
+                    safe_code = re.sub(r"[^A-Za-z0-9_-]", "", code)
+                    url = f"https://fgtas.invalid/vaga/{safe_code}"
                 if not valid_http_url(url):
                     result["errors"].append(
                         f"{data_path.name}: URL inválida para vaga {code}."
@@ -1432,73 +1439,67 @@ async def run_crawl() -> dict:
 
 
 async def scheduler():
+    """Executa coletas fora do event loop que atende as páginas/API."""
     import logging
 
     logger = logging.getLogger("uvicorn.error")
+    # Dá prioridade à disponibilidade do site após o deploy.
+    await asyncio.sleep(60)
 
     while True:
         try:
-            logger.info("ROBÔ: iniciando coleta automática.")
-            result = await run_crawl()
-
+            logger.info("ROBÔ: iniciando coleta automática em segundo plano.")
+            # run_crawl cria seu próprio loop assíncrono em uma thread de trabalho;
+            # operações PostgreSQL síncronas não bloqueiam as respostas HTTP.
+            result = await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
             logger.info(
-                "ROBÔ: coleta concluída. "
-                f"Fontes verificadas: {result['sources_checked']}; "
-                f"Vagas encontradas: {result['jobs_seen']}; "
-                f"Novas vagas: {result['jobs_added']}; "
-                f"Duplicadas: {result['duplicates']}; "
-                f"Expiradas desativadas: {result['expired_jobs']}; "
-                f"Erros: {len(result['errors'])}"
+                "ROBÔ: coleta concluída. Fontes: %s; vagas: %s; novas: %s; "
+                "duplicadas: %s; expiradas: %s; erros: %s",
+                result["sources_checked"], result["jobs_seen"],
+                result["jobs_added"], result["duplicates"],
+                result["expired_jobs"], len(result["errors"]),
             )
-
             for error in result["errors"]:
                 logger.warning("ROBÔ - FONTE: %s", error)
-
         except asyncio.CancelledError:
             raise
-
         except Exception:
             logger.exception("ROBÔ: falha na coleta automática.")
 
-        await asyncio.sleep(
-            max(
-                15,
-                int(config().get("scan_interval_minutes", 360)) * 60,
-            )
+        await asyncio.sleep(max(15, int(config().get("scan_interval_minutes", 360)) * 60))
+
+
+async def background_import_and_scheduler():
+    """Importa arquivos FGTAS depois que a API já está disponível."""
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+    await asyncio.sleep(3)
+    try:
+        imported = await asyncio.to_thread(import_fgtas_jobs)
+        logger.info(
+            "FGTAS/SINE em segundo plano: registros lidos=%s; novas vagas=%s; erros=%s",
+            imported["jobs_seen"], imported["jobs_added"], len(imported["errors"]),
         )
+        for error in imported["errors"]:
+            logger.warning("FGTAS/SINE: %s", error)
+    except Exception:
+        logger.exception("FGTAS/SINE: falha na importação em segundo plano.")
+    await scheduler()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-
-    imported = import_fgtas_jobs()
-
-    import logging
-    logger = logging.getLogger("uvicorn.error")
-
-    logger.info(
-        "FGTAS/SINE: registros lidos=%s; "
-        "novas vagas=%s; erros=%s",
-        imported["jobs_seen"],
-        imported["jobs_added"],
-        len(imported["errors"])
-    )
-
-    for error in imported["errors"]:
-        logger.warning("FGTAS/SINE: %s", error)
-
-    task = asyncio.create_task(scheduler())
-
+    # A estrutura do banco precisa existir antes das rotas responderem.
+    # A importação de centenas de registros fica fora do caminho crítico do startup.
+    await asyncio.to_thread(init_db)
+    task = asyncio.create_task(background_import_and_scheduler())
     yield
-
     task.cancel()
-
     try:
         await task
     except asyncio.CancelledError:
         pass
-        
+
 
 app = FastAPI(
     title="Busca Vagas API",
@@ -1538,113 +1539,127 @@ def jobs(
     q: str = "",
     location: str = "",
     mode: str = "",
+    modes: str = "",
     state: str = "",
-    limit: int = Query(50, ge=1, le=200),
+    employment_type: str = "",
+    limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    terms, args = [
+    """Pesquisa e filtra no banco antes da paginação."""
+    terms = [
         "active=1",
         "(valid_through IS NULL OR TRIM(valid_through) = '' OR date(valid_through) >= date('now'))",
-    ], []
+    ]
+    args: list[Any] = []
 
     if q.strip():
-        terms.append(
-            "(title LIKE ? OR company LIKE ? OR description LIKE ?)"
-        )
+        terms.append("(title ILIKE ? OR company ILIKE ? OR description ILIKE ?)")
         like = "%" + q.strip() + "%"
         args.extend([like, like, like])
 
-    
-    if location.strip().lower() in ("brasil", "brazil"):
-        brazil_patterns = [
-            "%Brasil%", "%Brazil%",
-            "%São Paulo%", "%Rio de Janeiro%",
-            "%Belo Horizonte%", "%Brasília%",
-            "%Curitiba%", "%Porto Alegre%",
-            "%Florianópolis%", "%Caxias do Sul%",
-            "%Salvador%", "%Recife%",
-            "%Fortaleza%", "%Goiânia%",
-            "%Manaus%", "%Campinas%",
-            "%Minas Gerais%", "%Rio Grande do Sul%",
-            "%Santa Catarina%", "%Paraná%",
-            "%Bahia%", "%Pernambuco%",
-            "%Ceará%", "%Espírito Santo%",
-            "%Goiás%", "%Amazonas%",
-            "%Mato Grosso%", "%Mato Grosso do Sul%",
-            "%Pará%", "%Paraíba%", "%Sergipe%",
-            "%Alagoas%", "%Amapá%", "%Acre%",
-            "%Rondônia%", "%Roraima%", "%Tocantins%",
-            "%Maranhão%", "%Piauí%",
-            "%Rio Grande do Norte%"
+    # Pesquisa nacional: aceita qualquer UF brasileira e vagas remotas
+    # explicitamente identificadas como elegíveis para o Brasil.
+    uf_names = {
+        "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
+        "BA": "Bahia", "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo",
+        "GO": "Goiás", "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul",
+        "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba", "PR": "Paraná",
+        "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro", "RN": "Rio Grande do Norte",
+        "RS": "Rio Grande do Sul", "RO": "Rondônia", "RR": "Roraima", "SC": "Santa Catarina",
+        "SP": "São Paulo", "SE": "Sergipe", "TO": "Tocantins",
+    }
+
+    def state_conditions(code: str) -> tuple[str, list[str]]:
+        code = code.strip().upper()
+        if code not in uf_names:
+            return "", []
+        patterns = [
+            f"%, {code}%", f"%/{code}%", f"%- {code}%", f"% {code}%",
+            f"%{uf_names[code]}%",
         ]
+        return "(" + " OR ".join(["location ILIKE ?"] * len(patterns)) + ")", patterns
 
-        location_conditions = " OR ".join(
-            ["location LIKE ?" for _ in brazil_patterns]
-        )
-
-        terms.append(
-            "(" + location_conditions +
-            " OR (mode = 'Remoto' AND ("
-            "description LIKE '%Brazil%' OR "
-            "description LIKE '%Brasil%' OR "
-            "description LIKE '%worldwide%' OR "
-            "description LIKE '%anywhere in the world%'"
-            ")))"
-        )
-        args.extend(brazil_patterns)
-
-    else:
-        if location.strip():
-            terms.append("location LIKE ?")
-            args.append("%" + location.strip() + "%")
-
-    # Modalidade e estado devem ser aplicados também quando a localização
-    # selecionada for Brasil/Brazil.
-    if mode.strip() and mode.strip().lower() not in ("todas", "todos"):
-        if mode.strip().lower() in ("hibrido", "híbrido"):
-            terms.append("LOWER(REPLACE(mode, 'í', 'i')) = ?")
-            args.append("hibrido")
-        else:
-            terms.append("LOWER(mode)=LOWER(?)")
-            args.append(mode.strip())
+    if location.strip().lower() in ("brasil", "brazil", "todo o brasil", "todo brasil"):
+        national_patterns = []
+        for code, state_name in uf_names.items():
+            national_patterns.extend([f"%, {code}%", f"%/{code}%", f"%- {code}%", f"%{state_name}%"])
+        national_patterns.extend(["%Brasil%", "%Brazil%"])
+        location_parts = ["location ILIKE ?" for _ in national_patterns]
+        remote_parts = [
+            "description ILIKE '%Brasil%'", "description ILIKE '%Brazil%'",
+            "description ILIKE '%worldwide%'", "description ILIKE '%anywhere in the world%'",
+        ]
+        terms.append("((" + " OR ".join(location_parts) + ") OR (mode ILIKE '%remoto%' AND (" + " OR ".join(remote_parts) + "))) ")
+        args.extend(national_patterns)
+    elif location.strip():
+        terms.append("location ILIKE ?")
+        args.append("%" + location.strip() + "%")
 
     if state.strip():
-        terms.append("location LIKE ?")
-        args.append("%" + state.strip() + "%")
+        state_sql, state_args = state_conditions(state)
+        if state_sql:
+            terms.append(state_sql)
+            args.extend(state_args)
+
+    if mode.strip() and mode.strip().lower() not in ("todas", "todos"):
+        normalized_mode = mode.strip().lower().replace("í", "i")
+        if normalized_mode in ("hibrido", "presencial", "remoto"):
+            terms.append("LOWER(REPLACE(mode, 'í', 'i')) = ?")
+            args.append(normalized_mode)
+        else:
+            terms.append("mode ILIKE ?")
+            args.append("%" + mode.strip() + "%")
+
+    selected_modes = [x.strip().lower().replace("í", "i") for x in modes.split(",") if x.strip()]
+    selected_modes = list(dict.fromkeys(x for x in selected_modes if x in ("presencial", "hibrido", "remoto")))
+    if selected_modes:
+        mode_parts = []
+        for selected in selected_modes:
+            mode_parts.append("LOWER(REPLACE(mode, 'í', 'i')) = ?")
+            args.append(selected)
+        terms.append("(" + " OR ".join(mode_parts) + ")")
+
+    # Valores da interface são categorias; o banco mantém o texto original da fonte.
+    type_map = {
+        "efetivo (clt)": ["%clt%", "%efetivo%", "%permanente%"],
+        "temporário": ["%tempor%", "%prazo determinado%"],
+        "estágio": ["%estag%"],
+        "aprendiz": ["%aprendiz%"],
+        "freelance": ["%freelance%", "%freela%", "%autonom%"],
+    }
+    selected_types = [x.strip().lower() for x in employment_type.split(",") if x.strip()]
+    type_groups = []
+    for selected in selected_types:
+        patterns = type_map.get(selected)
+        if not patterns:
+            continue
+        type_groups.append("(" + " OR ".join(["employment_type ILIKE ?"] * len(patterns)) + ")")
+        args.extend(patterns)
+    if type_groups:
+        terms.append("(" + " OR ".join(type_groups) + ")")
 
     where = " AND ".join(terms)
-
-
     with db() as con:
-        total = con.execute(
-            f"SELECT COUNT(*) FROM jobs WHERE {where}", args
-        ).fetchone()[0]
-
+        total = con.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", args).fetchone()[0]
         rows = con.execute(f"""
-            SELECT id, title, company, location, mode,
-                   employment_type, salary, description, url,
-                   source, date_posted, valid_through, first_seen,
+            SELECT id, title, company, location, mode, employment_type, salary,
+                   description, url, source, date_posted, valid_through, first_seen,
                    COALESCE(NULLIF(link_status, ''), 'pending') AS link_status
-            FROM jobs
-            WHERE {where}
+            FROM jobs WHERE {where}
             ORDER BY
                 CASE WHEN TRIM(COALESCE(date_posted, '')) = '' THEN 1 ELSE 0 END,
                 date(date_posted) DESC,
                 CASE COALESCE(NULLIF(link_status, ''), 'pending')
-                    WHEN 'valid' THEN 0
-                    WHEN 'inconclusive' THEN 1
-                    WHEN 'pending' THEN 2
-                    WHEN 'broken' THEN 3
-                    ELSE 2
+                    WHEN 'valid' THEN 0 WHEN 'inconclusive' THEN 1
+                    WHEN 'pending' THEN 2 WHEN 'broken' THEN 3 ELSE 2
                 END,
                 first_seen DESC
             LIMIT ? OFFSET ?
         """, args + [limit, offset]).fetchall()
 
-    return {
-        "total": total,
-        "items": [dict(row) for row in rows],
-    }
+    return {"total": total, "limit": limit, "offset": offset,
+            "has_more": offset + len(rows) < total,
+            "items": [dict(row) for row in rows]}
 
 
 @app.get("/api/stats")
@@ -1775,7 +1790,11 @@ async def manual_crawl(x_crawl_token: str = Header(default="")):
             detail="Token inválido"
         )
 
-    return await run_crawl()
+    return await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
 
 
-app.mount("/static", StaticFiles(directory=BASE), name="static")
+# Só publica arquivos colocados deliberadamente em /static; nunca expõe
+# main.py, sources.json, .env ou arquivos locais FGTAS/SINE.
+STATIC_DIR = BASE / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
