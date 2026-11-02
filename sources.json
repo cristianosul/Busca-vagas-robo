@@ -3,12 +3,29 @@
   "max_pages_per_source": 30,
   "request_timeout_seconds": 20,
   "greenhouse_boards": [
-    "mongodb"
+    "mongodb",
+    "ifoodcarreiras",
+    "vtex",
+    "capco",
+    "blip-global"
   ],
   "lever_sites": [
-    "ciandt"
+    "ciandt",
+    "cloudwalk",
+    "weloglobal",
+    "brafton",
+    "openx"
   ],
-  "ashby_boards": [],
+  "ashby_boards": [
+    "canals",
+    "pebl",
+    "outpostnow",
+    "connectly",
+    "tilthq",
+    "fonio",
+    "elevenlabs",
+    "hiya"
+  ],
   "smartrecruiters_companies": [
     "Experian",
     "Expeditors",
