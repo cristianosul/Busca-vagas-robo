@@ -1619,21 +1619,47 @@ def jobs(
             args.append(selected)
         terms.append("(" + " OR ".join(mode_parts) + ")")
 
-    # Valores da interface são categorias; o banco mantém o texto original da fonte.
+    # A interface usa cinco categorias estáveis, mas cada fonte publica
+    # employment_type com vocabulários diferentes (PT/EN e com/sem acentos).
+    # Normalizamos acentos no SQL para que "Estágio" também encontre "Estágio",
+    # "estagio" e "Internship", sem alterar os valores originais armazenados.
+    normalized_type_sql = (
+        "translate(lower(COALESCE(employment_type, '')), "
+        "'áàâãäéèêëíìîïóòôõöúùûüç', "
+        "'aaaaaeeeeiiiiooooouuuuc')"
+    )
     type_map = {
-        "efetivo (clt)": ["%clt%", "%efetivo%", "%permanente%"],
-        "temporário": ["%tempor%", "%prazo determinado%"],
-        "estágio": ["%estag%"],
-        "aprendiz": ["%aprendiz%"],
-        "freelance": ["%freelance%", "%freela%", "%autonom%"],
+        "efetivo (clt)": [
+            "%clt%", "%efetivo%", "%permanent%", "%full-time%",
+            "%full time%", "%tempo integral%", "%indefinite%",
+        ],
+        "temporario": [
+            "%tempor%", "%temporary%", "%fixed-term%", "%fixed term%",
+            "%prazo determinado%", "%contrato temporario%",
+        ],
+        "estagio": ["%estagio%", "%internship%", "%intern%"],
+        "aprendiz": ["%aprendiz%", "%apprentice%", "%apprenticeship%"],
+        "freelance": [
+            "%freelance%", "%freela%", "%autonom%", "%self-employed%",
+            "%independent contractor%", "%gig%",
+        ],
     }
-    selected_types = [x.strip().lower() for x in employment_type.split(",") if x.strip()]
+    # Também aceita variações do próprio rótulo enviado pela interface.
+    selected_types = [
+        re.sub(r"\s+", " ", x.strip().lower())
+        for x in employment_type.split(",") if x.strip()
+    ]
     type_groups = []
     for selected in selected_types:
-        patterns = type_map.get(selected)
+        selected_normalized = selected.translate(str.maketrans(
+            "áàâãäéèêëíìîïóòôõöúùûüç", "aaaaaeeeeiiiiooooouuuuc"
+        ))
+        if selected_normalized == "jovem aprendiz":
+            selected_normalized = "aprendiz"
+        patterns = type_map.get(selected_normalized)
         if not patterns:
             continue
-        type_groups.append("(" + " OR ".join(["employment_type ILIKE ?"] * len(patterns)) + ")")
+        type_groups.append("(" + " OR ".join([f"{normalized_type_sql} LIKE ?"] * len(patterns)) + ")")
         args.extend(patterns)
     if type_groups:
         terms.append("(" + " OR ".join(type_groups) + ")")
