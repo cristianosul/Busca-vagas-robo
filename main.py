@@ -10,9 +10,10 @@ from collections.abc import Mapping
 
 import psycopg
 import tempfile
+import time
 import unicodedata
 from urllib.parse import urlsplit
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -145,6 +146,38 @@ class DatabaseConnection:
 
 def db():
     return DatabaseConnection()
+
+
+@contextmanager
+def exclusive_database_job():
+    """Garante exclusividade entre coleta e importação, inclusive entre processos Render."""
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL não configurada no ambiente.")
+
+    lock_connection = psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=8,
+        autocommit=True,
+    )
+    acquired = False
+    try:
+        acquired = bool(
+            lock_connection.execute(
+                "SELECT pg_try_advisory_lock(%s)",
+                (724190263,),
+            ).fetchone()[0]
+        )
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                lock_connection.execute(
+                    "SELECT pg_advisory_unlock(%s)",
+                    (724190263,),
+                )
+            except Exception:
+                pass
+        lock_connection.close()
 
 
 def init_db():        
@@ -609,6 +642,18 @@ def upsert(job: dict) -> bool:
         ))
 
     return True
+
+
+def upsert(job: dict) -> bool:
+    """Repete transações em deadlock/serialização sem perder o anúncio."""
+    for attempt in range(4):
+        try:
+            return _upsert_once(job)
+        except psycopg.Error as exc:
+            if getattr(exc, "sqlstate", None) not in ("40P01", "40001") or attempt == 3:
+                raise
+            time.sleep(0.15 * (attempt + 1))
+    return False
 
 
 async def check_application_links(batch_size: int = 200) -> dict:
@@ -1220,8 +1265,24 @@ def import_fgtas_jobs() -> dict:
 
     return result
 
-async def run_crawl() -> dict:
+
+def import_fgtas_jobs() -> dict:
+    """Importa FGTAS somente quando nenhuma coleta estiver gravando no banco."""
+    with exclusive_database_job() as acquired:
+        if not acquired:
+            return {
+                "jobs_seen": 0,
+                "jobs_added": 0,
+                "errors": ["Importação FGTAS adiada: já existe uma coleta/importação em andamento."],
+                "skipped": True,
+            }
+        return _import_fgtas_jobs_unlocked()
+
+
+async def _run_crawl_unlocked() -> dict:
     global CRAWL_METRICS
+    import logging
+    logger = logging.getLogger("uvicorn.error")
     CRAWL_METRICS = {"duplicates": 0}
     cfg = config()
 
@@ -1252,6 +1313,7 @@ async def run_crawl() -> dict:
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+                logger.info("ROBÔ fonte Greenhouse/%s: encontradas=%s; novas=%s", slug, t, a)
 
                 if t == 0:
                     stats["errors"].append(
@@ -1269,6 +1331,7 @@ async def run_crawl() -> dict:
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+                logger.info("ROBÔ fonte Lever/%s: encontradas=%s; novas=%s", slug, t, a)
 
                 if t == 0:
                     stats["errors"].append(
@@ -1286,6 +1349,7 @@ async def run_crawl() -> dict:
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+                logger.info("ROBÔ fonte Ashby/%s: encontradas=%s; novas=%s", slug, t, a)
 
                 if t == 0:
                     stats["errors"].append(
@@ -1312,6 +1376,7 @@ async def run_crawl() -> dict:
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+                logger.info("ROBÔ fonte SmartRecruiters/%s: encontradas=%s; novas=%s", slug, t, a)
 
                 if t == 0:
                     stats["errors"].append(
@@ -1336,6 +1401,7 @@ async def run_crawl() -> dict:
                 stats["sources_checked"] += 1
                 stats["jobs_seen"] += t
                 stats["jobs_added"] += a
+                logger.info("ROBÔ fonte Gupy/%s: encontradas=%s; novas=%s", keyword, t, a)
 
             except Exception as e:
                 stats["errors"].append(str(e)[:180])
@@ -1438,6 +1504,24 @@ async def run_crawl() -> dict:
     return stats
 
 
+async def run_crawl() -> dict:
+    """Executa uma única coleta por vez em todos os processos conectados ao PostgreSQL."""
+    with exclusive_database_job() as acquired:
+        if not acquired:
+            return {
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "sources_checked": 0,
+                "jobs_seen": 0,
+                "jobs_added": 0,
+                "duplicates": 0,
+                "expired_jobs": 0,
+                "errors": ["Coleta ignorada: outra coleta/importação já está em andamento."],
+                "skipped": True,
+            }
+        return await _run_crawl_unlocked()
+
+
 async def scheduler():
     """Executa coletas fora do event loop que atende as páginas/API."""
     import logging
@@ -1452,13 +1536,16 @@ async def scheduler():
             # run_crawl cria seu próprio loop assíncrono em uma thread de trabalho;
             # operações PostgreSQL síncronas não bloqueiam as respostas HTTP.
             result = await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
-            logger.info(
-                "ROBÔ: coleta concluída. Fontes: %s; vagas: %s; novas: %s; "
-                "duplicadas: %s; expiradas: %s; erros: %s",
-                result["sources_checked"], result["jobs_seen"],
-                result["jobs_added"], result["duplicates"],
-                result["expired_jobs"], len(result["errors"]),
-            )
+            if result.get("skipped"):
+                logger.warning("ROBÔ: %s", result["errors"][0])
+            else:
+                logger.info(
+                    "ROBÔ: coleta concluída. Fontes: %s; vagas: %s; novas: %s; "
+                    "duplicadas: %s; expiradas: %s; erros: %s",
+                    result["sources_checked"], result["jobs_seen"],
+                    result["jobs_added"], result["duplicates"],
+                    result["expired_jobs"], len(result["errors"]),
+                )
             for error in result["errors"]:
                 logger.warning("ROBÔ - FONTE: %s", error)
         except asyncio.CancelledError:
@@ -1476,10 +1563,13 @@ async def background_import_and_scheduler():
     await asyncio.sleep(3)
     try:
         imported = await asyncio.to_thread(import_fgtas_jobs)
-        logger.info(
-            "FGTAS/SINE em segundo plano: registros lidos=%s; novas vagas=%s; erros=%s",
-            imported["jobs_seen"], imported["jobs_added"], len(imported["errors"]),
-        )
+        if imported.get("skipped"):
+            logger.warning("FGTAS/SINE: %s", imported["errors"][0])
+        else:
+            logger.info(
+                "FGTAS/SINE em segundo plano: registros lidos=%s; novas vagas=%s; erros=%s",
+                imported["jobs_seen"], imported["jobs_added"], len(imported["errors"]),
+            )
         for error in imported["errors"]:
             logger.warning("FGTAS/SINE: %s", error)
     except Exception:
@@ -1503,7 +1593,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Busca Vagas API",
-    version="0.4.0",
+    version="0.4.1",
     lifespan=lifespan,
 )
 
@@ -1816,7 +1906,10 @@ async def manual_crawl(x_crawl_token: str = Header(default="")):
             detail="Token inválido"
         )
 
-    return await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
+    result = await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
+    if result.get("skipped"):
+        raise HTTPException(status_code=409, detail=result["errors"][0])
+    return result
 
 
 # Só publica arquivos colocados deliberadamente em /static; nunca expõe
