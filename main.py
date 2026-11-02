@@ -535,7 +535,7 @@ def canonical_job_key(job: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def upsert(job: dict) -> bool:
+def _upsert_once(job: dict) -> bool:
     url = clean(job.get("url")).split("#")[0].strip()
 
     if not valid_http_url(url) or not clean(job.get("title")):
@@ -666,8 +666,8 @@ async def check_application_links(batch_size: int = 200) -> dict:
         rows = con.execute("""
             SELECT id, url FROM jobs
             WHERE active=1
-              AND url NOT ILIKE '%fgtas.invalid%'
-              AND NOT (source ILIKE '%FGTAS%' AND url ILIKE '%?vaga=%')
+              AND url NOT ILIKE '%%fgtas.invalid%%'
+              AND NOT (source ILIKE '%%FGTAS%%' AND url ILIKE '%%?vaga=%%')
               AND (
                 link_status='pending' OR link_checked_at=''
                 OR link_checked_at < ?
@@ -1676,8 +1676,8 @@ def jobs(
         national_patterns.extend(["%Brasil%", "%Brazil%"])
         location_parts = ["location ILIKE ?" for _ in national_patterns]
         remote_parts = [
-            "description ILIKE '%Brasil%'", "description ILIKE '%Brazil%'",
-            "description ILIKE '%worldwide%'", "description ILIKE '%anywhere in the world%'",
+            "description ILIKE '%%Brasil%%'", "description ILIKE '%%Brazil%%'",
+            "description ILIKE '%%worldwide%%'", "description ILIKE '%%anywhere in the world%%'",
         ]
         terms.append("((" + " OR ".join(location_parts) + ") OR (mode ILIKE '%remoto%' AND (" + " OR ".join(remote_parts) + "))) ")
         args.extend(national_patterns)
