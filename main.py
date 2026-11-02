@@ -1175,7 +1175,7 @@ async def gupy(
 
     return total, added
 
-def import_fgtas_jobs() -> dict:
+def _import_fgtas_jobs_unlocked() -> dict:
     """Importa arquivos locais de vagas FGTAS/SINE de vários municípios.
 
     Cada arquivo fgtas_sine_*.json deve conter um objeto com "items" (lista
