@@ -525,8 +525,15 @@ def canonical_job_key(job: dict) -> str:
     company = normalized_text(job.get("company"))
     location = normalized_text(job.get("location"))
 
-    # Deduplicação cruzada conservadora: não funde empresas desconhecidas
-    # nem anúncios sem localidade, para reduzir falsos positivos.
+    # FGTAS/SINE: o código oficial identifica a oportunidade. Como várias
+    # vagas intermediadas aparecem com empresa "Confidencial", não aplicar
+    # deduplicação aproximada por título/empresa/localidade a esses registros.
+    source = normalized_text(job.get("source"))
+    url = clean(job.get("url")).lower()
+    if "fgtas" in source or "sine" in source or ".invalid/" in url:
+        return ""
+
+    # Deduplicação cruzada conservadora para fontes corporativas.
     generic_companies = {"", "empresa", "confidencial", "unknown", "nao informado"}
     if not title or not company or company in generic_companies or not location:
         return ""
@@ -1244,12 +1251,19 @@ def _import_fgtas_jobs_unlocked() -> dict:
                     )
                     continue
 
+                location = clean(item.get("location")) or default_location
+                if not location:
+                    result["errors"].append(
+                        f"{data_path.name}: vaga {code} ignorada porque não informa município/UF."
+                    )
+                    continue
+
                 result["jobs_seen"] += 1
                 result["jobs_added"] += upsert({
                     "title": title,
                     "company": clean(item.get("company")) or "Confidencial",
-                    "location": clean(item.get("location")) or default_location or "Rio Grande do Sul",
-                    "mode": clean(item.get("mode")) or "Presencial",
+                    "location": location,
+                    "mode": clean(item.get("mode")) or "Não informado",
                     "employment_type": clean(item.get("employment_type")),
                     "salary": clean(item.get("salary")),
                     "description": " | ".join(details),
