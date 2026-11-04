@@ -24,7 +24,9 @@
     "tilthq",
     "fonio",
     "elevenlabs",
-    "hiya"
+    "hiya",
+    "nubank",
+    "taktile"
   ],
   "smartrecruiters_companies": [
     "Experian",
@@ -79,5 +81,6 @@
     "auxiliar de cozinha",
     "operador de caixa",
     "aprendiz"
-  ]
+  ],
+  "workable_accounts": []
 }
