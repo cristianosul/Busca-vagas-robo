@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "lever_sites": [],
     "ashby_boards": [],
     "smartrecruiters_companies": [],
+    "workable_accounts": [],
     "jsonld_seed_urls": [],
     "sitemap_urls": [],
     "additional_sources": [],
@@ -352,6 +353,19 @@ def clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()[:4000]
 
 
+
+def company_from_slug(slug: str) -> str:
+    key = clean(slug).strip().lower()
+    known = {
+        "mongodb": "MongoDB", "ifoodcarreiras": "iFood", "vtex": "VTEX",
+        "capco": "Capco", "blip-global": "Blip", "ciandt": "CI&T",
+        "cloudwalk": "CloudWalk", "weloglobal": "Welo Global",
+        "brafton": "Brafton", "openx": "OpenX", "elevenlabs": "ElevenLabs",
+        "nubank": "Nubank", "taktile": "Taktile",
+    }
+    return known.get(key, key.replace("-", " ").replace("_", " ").title())
+
+
 def job_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:24]
 
@@ -426,6 +440,42 @@ def infer_mode(text: str, job: dict | None = None) -> str:
 
     return "Não informado"
     
+
+
+
+def remote_eligible_in_brazil(job: dict) -> bool:
+    mode = normalized_text(job.get("mode"))
+    if "remoto" not in mode and "remote" not in mode:
+        return True
+    location = normalized_text(job.get("location"))
+    description = normalized_text(job.get("description"))
+    if any(x in location for x in (
+        "brasil", "brazil", "latam", "latin america", "america latina",
+        "south america", "anywhere", "worldwide", "global remote"
+    )):
+        return True
+    foreign = (
+        "united states", "usa", "canada", "india", "japan",
+        "united kingdom", "ireland", "germany", "france", "spain",
+        "portugal", "netherlands", "australia", "new zealand",
+        "singapore", "poland", "europe only", "emea only", "apac only"
+    )
+    if any(x in location for x in foreign):
+        return False
+    restriction = (
+        "must be based in", "must reside in", "only applicants",
+        "candidates must be located in", "work authorization in",
+        "eligible to work in", "reside in"
+    )
+    countries = (
+        "united states", "usa", "canada", "india", "japan",
+        "united kingdom", "ireland", "germany", "france", "spain",
+        "portugal", "netherlands", "australia", "new zealand",
+        "singapore", "poland"
+    )
+    if any(x in description for x in restriction) and any(x in description for x in countries):
+        return False
+    return True
 
 
 def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
@@ -543,6 +593,8 @@ def canonical_job_key(job: dict) -> str:
 
 
 def _upsert_once(job: dict) -> bool:
+    if not remote_eligible_in_brazil(job):
+        return False
     url = clean(job.get("url")).split("#")[0].strip()
 
     if not valid_http_url(url) or not clean(job.get("title")):
@@ -576,9 +628,13 @@ def _upsert_once(job: dict) -> bool:
                     canonical_key=CASE WHEN ?='' THEN canonical_key ELSE ? END,
                     last_seen=?,
                     active=CASE
-                        WHEN date(COALESCE(NULLIF(?, ''), valid_through)) < date('now')
-                             AND COALESCE(NULLIF(?, ''), valid_through) != ''
-                        THEN 0 ELSE active END
+                        WHEN COALESCE(NULLIF(?, ''), valid_through) != ''
+                             AND date(COALESCE(NULLIF(?, ''), valid_through)) < date('now')
+                        THEN 0
+                        WHEN ? != '' AND date(?) >= date('now')
+                        THEN 1
+                        ELSE active
+                    END
                 WHERE url=?
             """, (
                 title, company, company, location, location,
@@ -590,6 +646,7 @@ def _upsert_once(job: dict) -> bool:
                 clean(job.get("date_posted")), clean(job.get("date_posted")),
                 incoming_valid_through, incoming_valid_through,
                 canonical_key, canonical_key, now,
+                incoming_valid_through, incoming_valid_through,
                 incoming_valid_through, incoming_valid_through, url
             ))
             if CRAWL_METRICS is not None:
@@ -774,7 +831,7 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
 
         added += upsert({
             "title": title,
-            "company": slug,
+            "company": company_from_slug(slug),
             "location": loc,
             "mode": infer_mode(loc + " " + desc),
             "description": desc,
@@ -814,7 +871,7 @@ async def lever(client, slug: str) -> tuple[int, int]:
 
         added += upsert({
             "title": title,
-            "company": slug,
+            "company": company_from_slug(slug),
             "location": loc,
             "mode": infer_mode(loc + " " + desc),
             "employment_type": clean(cats.get("commitment")),
@@ -861,7 +918,7 @@ async def ashby(client, slug: str) -> tuple[int, int]:
 
         added += upsert({
             "title": title,
-            "company": clean(item.get("department")) or slug,
+            "company": clean(item.get("organizationName") or item.get("companyName")) or company_from_slug(slug),
             "location": loc,
             "mode": infer_mode(loc + " " + workplace),
             "employment_type": clean(item.get("employmentType")),
@@ -874,6 +931,51 @@ async def ashby(client, slug: str) -> tuple[int, int]:
         })
 
     return total, added
+
+
+
+async def workable(client: httpx.AsyncClient, slug: str) -> tuple[int, int]:
+    """Coleta anúncios de quadros públicos Workable."""
+    endpoint = f"https://apply.workable.com/api/v1/widget/accounts/{slug}?details=true"
+    data = await fetch_json(client, endpoint)
+    if not isinstance(data, dict):
+        return 0, 0
+    entries = data.get("jobs", [])
+    if not isinstance(entries, list):
+        return 0, 0
+    employer = clean(data.get("name")) or company_from_slug(slug)
+    seen = added = 0
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        title = clean(item.get("title"))
+        url = clean(item.get("url") or item.get("application_url"))
+        code = clean(item.get("shortcode"))
+        if not url and code:
+            url = f"https://apply.workable.com/{slug}/j/{code}/"
+        if not title or not valid_http_url(url):
+            continue
+        places = item.get("locations")
+        loc = []
+        if isinstance(places, list):
+            for place in places:
+                if isinstance(place, dict):
+                    loc.extend(clean(place.get(k)) for k in ("city", "state", "country") if clean(place.get(k)))
+                elif clean(place):
+                    loc.append(clean(place))
+        location = ", ".join(dict.fromkeys(loc))
+        description = BeautifulSoup(clean(item.get("description")), "html.parser").get_text(" ", strip=True)
+        mode = "Remoto" if item.get("telecommuting") is True else infer_mode(location + " " + description)
+        seen += 1
+        added += upsert({
+            "title": title, "company": employer, "location": location,
+            "mode": mode, "employment_type": clean(item.get("employment_type")),
+            "salary": clean(item.get("salary")), "description": description,
+            "url": url, "source": "Workable",
+            "date_posted": clean(item.get("published_on")),
+            "valid_through": clean(item.get("application_deadline")),
+        })
+    return seen, added
 
 
 async def smartrecruiters(
@@ -1057,9 +1159,9 @@ async def gupy(
     added = 0
     seen_urls = set()
 
-    # Busca até 5 páginas de resultados por palavra-chave.
+    # Busca até 3 páginas por termo para reduzir carga e sobreposição.
     page_size = max(1, min(limit, 50))
-    max_pages = 5
+    max_pages = 3
 
     try:
         for page in range(max_pages):
@@ -1182,101 +1284,85 @@ async def gupy(
 
     return total, added
 
+
 def _import_fgtas_jobs_unlocked() -> dict:
-    """Importa arquivos locais de vagas FGTAS/SINE de vários municípios.
-
-    Cada arquivo fgtas_sine_*.json deve conter um objeto com "items" (lista
-    de vagas). A cidade pode ser informada no campo "city" do arquivo ou no
-    campo "location" de cada vaga. Nenhuma vaga/cidade é inventada aqui.
-    """
-    result = {"jobs_seen": 0, "jobs_added": 0, "errors": []}
-
+    """Importa a versão mais recente de cada vaga FGTAS/SINE por município+código."""
+    result = {"jobs_seen": 0, "jobs_added": 0, "files_used": [], "errors": []}
     paths = []
     if FGTAS_DATA_PATH.exists():
         paths.append(FGTAS_DATA_PATH)
-    paths.extend(path for path in BASE.glob("fgtas_sine_*.json") if path not in paths)
-
+    paths.extend(p for p in BASE.glob("fgtas_sine_*.json") if p not in paths)
     if not paths:
-        result["errors"].append(
-            "Nenhum arquivo fgtas_sine_*.json encontrado para importar."
-        )
+        result["errors"].append("Nenhum arquivo fgtas_sine_*.json encontrado para importar.")
         return result
 
-    for data_path in paths:
+    loaded, newest = [], {}
+    for data_path in sorted(paths, key=lambda p: p.name.lower()):
         try:
             payload = json.loads(data_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("Formato JSON inválido.")
-            items = payload.get("items", [])
-            if not isinstance(items, list):
-                raise ValueError("A lista de vagas é inválida.")
-
-            default_city = clean(payload.get("city"))
-            default_state = clean(payload.get("state")) or "RS"
-            default_location = ", ".join(
-                part for part in (default_city, default_state) if part
-            )
-            default_source = clean(payload.get("source")) or "FGTAS/SINE"
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                code = clean(item.get("source_id"))
-                title = clean(item.get("title"))
-                if not code or not title:
-                    continue
-
-                details = [f"Código da vaga FGTAS/SINE: {code}"]
-                description = clean(item.get("description"))
-                instructions = clean(item.get("application_instructions"))
-                if description:
-                    details.append(description)
-                if instructions:
-                    details.append("COMO SE CANDIDATAR: " + instructions)
-                if item.get("pcd_exclusive"):
-                    details.append("Vaga exclusiva para pessoa com deficiência (PCD).")
-                if item.get("no_experience_required"):
-                    details.append("Não exige experiência, conforme publicação.")
-
-                # O arquivo FGTAS/SINE pode não trazer link individual de candidatura.
-                # Nesse caso, usa um identificador interno .invalid apenas para deduplicação;
-                # ele nunca será exibido como link clicável nem submetido à checagem HTTP.
-                url = clean(item.get("application_url")) or clean(item.get("url"))
-                if not url:
-                    safe_code = re.sub(r"[^A-Za-z0-9_-]", "", code)
-                    url = f"https://fgtas.invalid/vaga/{safe_code}"
-                if not valid_http_url(url):
-                    result["errors"].append(
-                        f"{data_path.name}: URL inválida para vaga {code}."
-                    )
-                    continue
-
-                location = clean(item.get("location")) or default_location
-                if not location:
-                    result["errors"].append(
-                        f"{data_path.name}: vaga {code} ignorada porque não informa município/UF."
-                    )
-                    continue
-
-                result["jobs_seen"] += 1
-                result["jobs_added"] += upsert({
-                    "title": title,
-                    "company": clean(item.get("company")) or "Confidencial",
-                    "location": location,
-                    "mode": clean(item.get("mode")) or "Não informado",
-                    "employment_type": clean(item.get("employment_type")),
-                    "salary": clean(item.get("salary")),
-                    "description": " | ".join(details),
-                    "url": url,
-                    "source": clean(item.get("source")) or default_source,
-                    "date_posted": clean(item.get("publication_date")) or clean(payload.get("publication_date")),
-                    "valid_through": clean(item.get("valid_through")),
-                })
+            if not isinstance(payload, dict) or not isinstance(payload.get("items", []), list):
+                raise ValueError("Formato JSON ou lista de vagas inválido.")
+            date_text = clean(payload.get("publication_date") or payload.get("generated_at"))
+            match = re.search(r"(20\d{2}-\d{2}-\d{2})", data_path.name)
+            if match and match.group(1) > date_text[:10]:
+                date_text = match.group(1)
+            date_key = date_text[:10] if re.match(r"20\d{2}-\d{2}-\d{2}", date_text) else ""
+            loaded.append((data_path, payload, payload.get("items", []), date_key, data_path.stat().st_mtime))
         except Exception as exc:
-            result["errors"].append(
-                f"{data_path.name}: {str(exc)[:180]}"
-            )
+            result["errors"].append(f"{data_path.name}: {str(exc)[:160]}")
 
+    for path, payload, items, date_key, mtime in loaded:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            code, title = clean(item.get("source_id")), clean(item.get("title"))
+            if not code or not title:
+                continue
+            location = clean(item.get("location"))
+            if not location:
+                location = ", ".join(x for x in (clean(payload.get("city")), clean(payload.get("state")) or "RS") if x)
+            city_key = normalized_text(location.split(",")[0])
+            key = (city_key, code)
+            rank = (date_key, mtime, path.name.lower())
+            if key not in newest or rank > newest[key][0]:
+                newest[key] = (rank, path, payload, item, location)
+
+    used = set()
+    for _, path, payload, item, location in newest.values():
+        used.add(path.name)
+        code = clean(item.get("source_id"))
+        details = [f"Código da vaga FGTAS/SINE: {code}"]
+        desc, instructions = clean(item.get("description")), clean(item.get("application_instructions"))
+        if desc:
+            details.append(desc)
+        if instructions:
+            details.append("COMO SE CANDIDATAR: " + instructions)
+        if item.get("pcd_exclusive"):
+            details.append("Vaga exclusiva para pessoa com deficiência (PCD).")
+        if item.get("no_experience_required"):
+            details.append("Não exige experiência, conforme publicação.")
+        url = clean(item.get("application_url")) or clean(item.get("url"))
+        if not url:
+            safe_code = re.sub(r"[^A-Za-z0-9_-]", "", code)
+            url = f"https://fgtas.invalid/vaga/{safe_code}"
+        if not valid_http_url(url):
+            result["errors"].append(f"{path.name}: URL inválida para vaga {code}.")
+            continue
+        result["jobs_seen"] += 1
+        result["jobs_added"] += upsert({
+            "title": clean(item.get("title")),
+            "company": clean(item.get("company")) or "Confidencial",
+            "location": location,
+            "mode": clean(item.get("mode")) or "Não informado",
+            "employment_type": clean(item.get("employment_type")),
+            "salary": clean(item.get("salary")),
+            "description": " | ".join(details),
+            "url": url,
+            "source": clean(item.get("source")) or clean(payload.get("source")) or "FGTAS/SINE",
+            "date_posted": clean(item.get("publication_date")) or clean(payload.get("publication_date")),
+            "valid_through": clean(item.get("valid_through")),
+        })
+    result["files_used"] = sorted(used)
     return result
 
 
@@ -1402,6 +1488,18 @@ async def _run_crawl_unlocked() -> dict:
                 stats["errors"].append(
                     f"SmartRecruiters {slug}: {str(e)[:180]}"
                 )
+
+        for slug in cfg.get("workable_accounts", []):
+            try:
+                t, a = await workable(client, slug)
+                stats["sources_checked"] += 1
+                stats["jobs_seen"] += t
+                stats["jobs_added"] += a
+                logger.info("ROBÔ Workable/%s: encontradas=%s; novas=%s", slug, t, a)
+                if t == 0:
+                    stats["errors"].append(f"Workable {slug}: nenhum anúncio retornado.")
+            except Exception as exc:
+                stats["errors"].append(f"Workable {slug}: {str(exc)[:160]}")
 
         gupy_keywords = cfg.get("gupy_keywords", DEFAULT_CONFIG["gupy_keywords"])
         if not isinstance(gupy_keywords, list):
