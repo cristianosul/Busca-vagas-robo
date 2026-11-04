@@ -730,8 +730,8 @@ async def check_application_links(batch_size: int = 200) -> dict:
         rows = con.execute("""
             SELECT id, url FROM jobs
             WHERE active=1
-              AND url NOT ILIKE '%%fgtas.invalid%%'
-              AND NOT (source ILIKE '%%FGTAS%%' AND url ILIKE '%%?vaga=%%')
+              AND url NOT ILIKE ?
+              AND NOT (source ILIKE ? AND url ILIKE ?)
               AND (
                 link_status='pending' OR link_checked_at=''
                 OR link_checked_at < ?
@@ -739,7 +739,13 @@ async def check_application_links(batch_size: int = 200) -> dict:
             ORDER BY CASE WHEN link_status='pending' THEN 0 ELSE 1 END,
                      COALESCE(date_posted, first_seen) DESC
             LIMIT ?
-        """, (cutoff_iso, max(1, min(int(batch_size), 500)))).fetchall()
+        """, (
+            "%fgtas.invalid%",
+            "%FGTAS%",
+            "%?vaga=%",
+            cutoff_iso,
+            max(1, min(int(batch_size), 500)),
+        )).fetchall()
 
     result = {
         "checked": 0, "valid": 0, "broken": 0,
@@ -1787,12 +1793,11 @@ def jobs(
             national_patterns.extend([f"%, {code}%", f"%/{code}%", f"%- {code}%", f"%{state_name}%"])
         national_patterns.extend(["%Brasil%", "%Brazil%"])
         location_parts = ["location ILIKE ?" for _ in national_patterns]
-        remote_parts = [
-            "description ILIKE '%%Brasil%%'", "description ILIKE '%%Brazil%%'",
-            "description ILIKE '%%worldwide%%'", "description ILIKE '%%anywhere in the world%%'",
-        ]
-        terms.append("((" + " OR ".join(location_parts) + ") OR (mode ILIKE '%remoto%' AND (" + " OR ".join(remote_parts) + "))) ")
+        remote_parts = ["description ILIKE ?" for _ in range(4)]
+        terms.append("((" + " OR ".join(location_parts) + ") OR (mode ILIKE ? AND (" + " OR ".join(remote_parts) + "))) ")
         args.extend(national_patterns)
+        args.append("%remoto%")
+        args.extend(["%Brasil%", "%Brazil%", "%worldwide%", "%anywhere in the world%"])
     elif location.strip():
         terms.append("location ILIKE ?")
         args.append("%" + location.strip() + "%")
