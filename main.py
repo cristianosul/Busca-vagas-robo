@@ -874,7 +874,7 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
         f"https://boards-api.greenhouse.io/v1/boards/"
         f"{slug}/jobs?content=true"
     )
-    data = await fetch_json(client, url)
+    data = await fetch_json(client, url, source=f"Lever {slug}")
 
     if not isinstance(data, dict):
         return 0, 0
