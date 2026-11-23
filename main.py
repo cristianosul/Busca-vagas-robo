@@ -30,6 +30,8 @@ import atexit
 import threading
 from psycopg_pool import ConnectionPool
 
+import logging
+
 load_dotenv()
 
 BASE = Path(__file__).resolve().parent
@@ -823,12 +825,47 @@ async def check_application_links(batch_size: int = 200) -> dict:
     return result
 
 
-async def fetch_json(client: httpx.AsyncClient, url: str):
+async def fetch_json(
+    client: httpx.AsyncClient,
+    url: str,
+    source: str | None = None,
+):
+    logger = logging.getLogger("uvicorn.error")
+    label = source or "API"
+
     try:
         response = await client.get(url, follow_redirects=True)
         response.raise_for_status()
         return response.json()
+
+    except httpx.HTTPStatusError as exc:
+        path = urlsplit(str(exc.request.url)).path
+        logger.warning(
+            "%s: HTTP %s ao consultar %s",
+            label,
+            exc.response.status_code,
+            path,
+        )
+        return None
+
+    except httpx.RequestError as exc:
+        logger.warning(
+            "%s: falha de conexão (%s)",
+            label,
+            type(exc).__name__,
+        )
+        return None
+
+    except ValueError as exc:
+        logger.warning(
+            "%s: resposta JSON inválida (%s)",
+            label,
+            type(exc).__name__,
+        )
+        return None
+
     except Exception:
+        logger.exception("%s: erro inesperado na consulta.", label)
         return None
 
 
