@@ -26,6 +26,10 @@ from fastapi.responses import FileResponse, HTMLResponse
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
+import atexit
+import threading
+from psycopg_pool import ConnectionPool
+
 load_dotenv()
 
 BASE = Path(__file__).resolve().parent
@@ -117,15 +121,42 @@ def translate_sql(statement: str) -> str:
     return statement
 
 
+_DATABASE_POOL = None
+_DATABASE_POOL_LOCK = threading.Lock()
+
+
+def get_database_pool():
+    """Cria e reutiliza um pool de conexões PostgreSQL."""
+    global _DATABASE_POOL
+
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL não configurada no ambiente.")
+
+    if _DATABASE_POOL is None:
+        with _DATABASE_POOL_LOCK:
+            if _DATABASE_POOL is None:
+                pool = ConnectionPool(
+                    conninfo=DATABASE_URL,
+                    min_size=1,
+                    max_size=5,
+                    timeout=20,
+                    kwargs={
+                        "connect_timeout": 20,
+                        "row_factory": hybrid_row,
+                    },
+                    open=False,
+                )
+                pool.open(wait=True)
+                atexit.register(pool.close)
+                _DATABASE_POOL = pool
+
+    return _DATABASE_POOL
+
+
 class DatabaseConnection:
     def __init__(self):
-        if not DATABASE_URL:
-            raise RuntimeError("DATABASE_URL não configurada no ambiente.")
-        self.connection = psycopg.connect(
-            DATABASE_URL,
-            connect_timeout=20,
-            row_factory=hybrid_row,
-        )
+        self._pool_context = get_database_pool().connection()
+        self.connection = self._pool_context.__enter__()
 
     def execute(self, statement, params=None):
         return self.connection.execute(
@@ -137,12 +168,11 @@ class DatabaseConnection:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type:
-            self.connection.rollback()
-        else:
-            self.connection.commit()
-        self.connection.close()
-        return False
+        return self._pool_context.__exit__(exc_type, exc, tb)
+
+
+def db():
+    return DatabaseConnection()
 
 
 def db():
