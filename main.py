@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "additional_sources": [],
     "gupy_keywords": [
         "auxiliar", "analista", "assistente", "vendedor", "operador",
-        "estágio", "jovem aprendiz", "atendente", "administrativo", eu
+        "estágio", "jovem aprendiz", "atendente", "administrativo",
         "financeiro", "recursos humanos", "logística", "produção",
         "técnico", "engenheiro", "desenvolvedor", "marketing",
         "motorista", "estoquista", "recepcionista", " serviços gerais",
