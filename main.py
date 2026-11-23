@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "additional_sources": [],
     "gupy_keywords": [
         "auxiliar", "analista", "assistente", "vendedor", "operador",
-        "estágio", "jovem aprendiz", "atendente", "administrativo",
+        "estágio", "jovem aprendiz", "atendente", "administrativo", eu
         "financeiro", "recursos humanos", "logística", "produção",
         "técnico", "engenheiro", "desenvolvedor", "marketing",
         "motorista", "estoquista", "recepcionista", " serviços gerais",
@@ -730,9 +730,11 @@ async def check_application_links(batch_size: int = 200) -> dict:
         rows = con.execute("""
             SELECT id, url FROM jobs
             WHERE active=1
-              AND url NOT ILIKE '%%fgtas.invalid%%'              
-              AND NOT (source ILIKE '%%FGTAS%%'
-              AND POSITION(chr(63) || 'vaga=' IN url) > 
+              AND url NOT ILIKE '%%fgtas.invalid%%'
+              AND NOT (
+                  source ILIKE '%%FGTAS%%'
+                  AND POSITION(chr(63) || 'vaga=' IN url) > 0
+              )
               AND (
                 link_status='pending' OR link_checked_at=''
                 OR link_checked_at < ?
