@@ -730,8 +730,9 @@ async def check_application_links(batch_size: int = 200) -> dict:
         rows = con.execute("""
             SELECT id, url FROM jobs
             WHERE active=1
-              AND url NOT ILIKE '%%fgtas.invalid%%'
-              AND NOT (source ILIKE '%%FGTAS%%' AND url ILIKE '%%?vaga=%%')
+              AND url NOT ILIKE '%%fgtas.invalid%%'              
+              AND NOT (source ILIKE '%%FGTAS%%'
+              AND POSITION(chr(63) || 'vaga=' IN url) > 
               AND (
                 link_status='pending' OR link_checked_at=''
                 OR link_checked_at < ?
