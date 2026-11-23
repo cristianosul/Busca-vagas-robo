@@ -175,10 +175,6 @@ def db():
     return DatabaseConnection()
 
 
-def db():
-    return DatabaseConnection()
-
-
 @contextmanager
 def exclusive_database_job():
     """Garante exclusividade entre coleta e importação, inclusive entre processos Render."""
