@@ -911,7 +911,7 @@ async def greenhouse(client, slug: str) -> tuple[int, int]:
 
 async def lever(client, slug: str) -> tuple[int, int]:
     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-    data = await fetch_json(client, url)
+    data = await fetch_json(client, url, source=f"Lever {slug}")
 
     if not isinstance(data, list):
         return 0, 0
