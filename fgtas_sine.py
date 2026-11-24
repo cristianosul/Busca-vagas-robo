@@ -182,7 +182,8 @@ def parse_jobs(pdf_bytes: bytes, edition_date: str, pdf_url: str) -> dict:
                 "NÃO PRECISA DE EXPERIÊNCIA" in upper
                 or "NAO PRECISA DE EXPERIENCIA" in upper
             ),
-            "application_url": None,
+            # O PDF é a referência oficial; a candidatura é presencial na agência.
+            "application_url": pdf_url,
             "application_instructions": (
                 "Consulte a disponibilidade antes de se deslocar. Anote o código "
                 "da vaga e dirija-se à agência FGTAS/SINE, Rua Bento Gonçalves, "
