@@ -2135,4 +2135,3 @@ async def manual_crawl(x_crawl_token: str = Header(default="")):
 STATIC_DIR = BASE / "static"
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-```[cite: 2]
