@@ -213,27 +213,40 @@ def parse_jobs(pdf_bytes: bytes, edition_date: str, pdf_url: str) -> dict:
     }
 
 
-def collect() -> dict:
+def collect(allow_stale: bool = False) -> dict:
     with _client() as client:
         pdf_url, edition_date = find_latest_pdf(client)
         today = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
+        stale_warning = None
         if edition_date != today:
-            raise CollectionError(
-                f"A página anuncia {edition_date}, mas hoje é {today}. "
-                "Coleta interrompida para evitar importar painel antigo."
+            msg = (
+                f"A página anuncia {edition_date}, mas hoje é {today}."
             )
+            if not allow_stale:
+                raise CollectionError(
+                    f"{msg} Coleta interrompida para evitar importar painel antigo."
+                )
+            stale_warning = msg
         pdf_bytes = download_pdf(client, pdf_url)
-    return parse_jobs(pdf_bytes, edition_date, pdf_url)
+    payload = parse_jobs(pdf_bytes, edition_date, pdf_url)
+    if stale_warning:
+        payload["warning"] = stale_warning
+    return payload
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--stdout", action="store_true")
+    parser.add_argument(
+        "--allow-older",
+        action="store_true",
+        help="Permite coletar mesmo quando a data da edição for diferente de hoje.",
+    )
     args = parser.parse_args()
 
     try:
-        payload = collect()
+        payload = collect(allow_stale=args.allow_older)
         serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
         if args.stdout:
             sys.stdout.write(serialized)
