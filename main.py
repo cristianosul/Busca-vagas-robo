@@ -2136,11 +2136,3 @@ STATIC_DIR = BASE / "static"
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 ```[cite: 2]
-
----
-
-### Resumo do que mudou
-* No `fgtas_sine.py`, `collect(allow_stale=False)` passa a aceitar coleta quando a data do painel difere da data atual, anexando `warning` em vez de abortar quando `allow_stale=True`.
-* No `main.py`, foram adicionados `_fgtas_item_to_job()` e `sync_fgtas_live()`, chamados dentro de `_run_crawl_unlocked()` com fallback automático para `_import_fgtas_jobs_unlocked()` caso a coleta online falhe[cite: 2].
-
-Quer testar isso como está ou ajustar também o *parser* do PDF (`fgtas_sine.py`) com base nos dados que você já tem?
