@@ -98,7 +98,6 @@ class HybridRow(Mapping):
         return len(self._keys)
 
 
-
 def hybrid_row(cursor):
     # Comandos SQL sem retorno de colunas.
     if cursor.description is None:
@@ -209,7 +208,7 @@ def exclusive_database_job():
         lock_connection.close()
 
 
-def init_db():        
+def init_db():
     with db() as con:
         con.execute("""
             CREATE OR REPLACE FUNCTION safe_job_date(value TEXT)
@@ -267,8 +266,6 @@ def init_db():
                 errors TEXT
             )
         """)
-        # Migração segura para bases antigas importadas sem IDENTITY/default.
-        # Se a coluna já usa IDENTITY ou uma sequence (SERIAL), não mexe nela.
         id_info = con.execute("""
             SELECT is_identity, column_default
             FROM information_schema.columns
@@ -290,7 +287,6 @@ def init_db():
                 ALTER COLUMN id SET DEFAULT nextval('crawl_runs_legacy_id_seq')
             """)
 
-        # Migrações compatíveis: preservam todos os registros já existentes.
         run_columns = {
             row["name"] for row in con.execute("""SELECT column_name AS name FROM information_schema.columns
                          WHERE table_schema=current_schema() AND table_name='crawl_runs'""")
@@ -310,7 +306,6 @@ def init_db():
                 "ALTER TABLE jobs ADD COLUMN canonical_key TEXT NOT NULL DEFAULT ''"
             )
 
-        # Estado da validação do link: não desativa vagas automaticamente.
         job_columns = {
             row["name"] for row in con.execute("""SELECT column_name AS name FROM information_schema.columns
                          WHERE table_schema=current_schema() AND table_name='jobs'""")
@@ -381,7 +376,6 @@ def clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()[:4000]
 
 
-
 def company_from_slug(slug: str) -> str:
     key = clean(slug).strip().lower()
     known = {
@@ -423,7 +417,6 @@ def location_text(value: Any) -> str:
 def infer_mode(text: str, job: dict | None = None) -> str:
     job = job or {}
 
-    # Prioriza o campo estruturado do anúncio.
     job_type = clean(job.get("jobLocationType")).lower()
     workplace = clean(
         job.get("workplaceType") or job.get("workplace_type")
@@ -446,7 +439,6 @@ def infer_mode(text: str, job: dict | None = None) -> str:
     )):
         return "Presencial"
 
-    # Fallback para localização e descrição.
     t = (text or "").lower()
 
     if any(x in t for x in (
@@ -467,8 +459,6 @@ def infer_mode(text: str, job: dict | None = None) -> str:
         return "Presencial"
 
     return "Não informado"
-    
-
 
 
 def remote_eligible_in_brazil(job: dict) -> bool:
@@ -528,7 +518,6 @@ def extract_jobposting(obj: Any, page_url: str, source: str) -> list[dict]:
 
                 if not loc:
                     loc = location_text(obj.get("address"))
-
 
                 desc = BeautifulSoup(
                     clean(obj.get("description")), "html.parser"
@@ -603,15 +592,11 @@ def canonical_job_key(job: dict) -> str:
     company = normalized_text(job.get("company"))
     location = normalized_text(job.get("location"))
 
-    # FGTAS/SINE: o código oficial identifica a oportunidade. Como várias
-    # vagas intermediadas aparecem com empresa "Confidencial", não aplicar
-    # deduplicação aproximada por título/empresa/localidade a esses registros.
     source = normalized_text(job.get("source"))
     url = clean(job.get("url")).lower()
     if "fgtas" in source or "sine" in source or ".invalid/" in url:
         return ""
 
-    # Deduplicação cruzada conservadora para fontes corporativas.
     generic_companies = {"", "empresa", "confidencial", "unknown", "nao informado"}
     if not title or not company or company in generic_companies or not location:
         return ""
@@ -681,7 +666,6 @@ def _upsert_once(job: dict) -> bool:
                 CRAWL_METRICS["duplicates"] += 1
             return False
 
-        # Procura anúncio equivalente de outra fonte nos últimos 45 dias.
         if canonical_key:
             match = con.execute("""
                 SELECT id FROM jobs
@@ -750,7 +734,6 @@ def upsert(job: dict) -> bool:
 
 async def check_application_links(batch_size: int = 200) -> dict:
     """Verifica um lote de links sem desativar vagas por falhas de rede."""
-    now = datetime.now(timezone.utc).isoformat()
     cutoff = datetime.now(timezone.utc).timestamp() - (14 * 24 * 60 * 60)
     cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat()
 
@@ -797,7 +780,6 @@ async def check_application_links(batch_size: int = 200) -> dict:
                     try:
                         response = await client.head(url)
                         status_code = response.status_code
-                        # Muitos sites de candidatura bloqueiam HEAD.
                         if status_code in (403, 405, 501):
                             async with client.stream("GET", url) as get_response:
                                 status_code = get_response.status_code
@@ -999,7 +981,6 @@ async def ashby(client, slug: str) -> tuple[int, int]:
     return total, added
 
 
-
 async def workable(client: httpx.AsyncClient, slug: str) -> tuple[int, int]:
     """Coleta anúncios de quadros públicos Workable."""
     endpoint = f"https://apply.workable.com/api/v1/widget/accounts/{slug}?details=true"
@@ -1150,7 +1131,7 @@ async def smartrecruiters(
         await asyncio.sleep(0.2)
 
     return total, added
-    
+
 
 async def crawl_page(client, url: str, source: str) -> tuple[int, int]:
     try:
@@ -1215,6 +1196,7 @@ async def crawl_sitemap(
     except Exception:
         return 0, 0
 
+
 async def gupy(
     client: httpx.AsyncClient,
     keyword: str,
@@ -1225,7 +1207,6 @@ async def gupy(
     added = 0
     seen_urls = set()
 
-    # Busca até 3 páginas por termo para reduzir carga e sobreposição.
     page_size = max(1, min(limit, 50))
     max_pages = 3
 
@@ -1249,8 +1230,6 @@ async def gupy(
 
             if not isinstance(items, list) or not items:
                 break
-
-            page_valid = 0
 
             for item in items:
                 if not isinstance(item, dict):
@@ -1318,7 +1297,6 @@ async def gupy(
                     )
 
                 total += 1
-                page_valid += 1
 
                 added += upsert({
                     "title": title,
@@ -1336,8 +1314,6 @@ async def gupy(
                     ),
                 })
 
-            # Evita novas requisições quando a página não
-            # contém anúncios válidos.
             if len(items) < page_size:
                 break
 
@@ -1349,6 +1325,93 @@ async def gupy(
         ) from e
 
     return total, added
+
+
+def _fgtas_item_to_job(item: dict, payload: dict, default_location: str | None = None) -> dict | None:
+    code = clean(item.get("source_id"))
+    title = clean(item.get("title"))
+    if not code or not title:
+        return None
+
+    location = default_location or clean(item.get("location"))
+    if not location:
+        location = ", ".join(
+            x for x in (
+                clean(payload.get("city")),
+                clean(payload.get("state")) or "RS",
+            )
+            if x
+        )
+
+    details = [f"Código da vaga FGTAS/SINE: {code}"]
+    desc = clean(item.get("description"))
+    instructions = clean(item.get("application_instructions"))
+    if desc:
+        details.append(desc)
+    if instructions:
+        details.append("COMO SE CANDIDATAR: " + instructions)
+    if item.get("pcd_exclusive"):
+        details.append("Vaga exclusiva para pessoa com deficiência (PCD).")
+    if item.get("no_experience_required"):
+        details.append("Não exige experiência, conforme publicação.")
+
+    url = clean(item.get("application_url")) or clean(item.get("url"))
+    if not url:
+        safe_code = re.sub(r"[^A-Za-z0-9_-]", "", code)
+        url = f"https://fgtas.invalid/vaga/{safe_code}"
+    if not valid_http_url(url):
+        return None
+
+    return {
+        "title": title,
+        "company": clean(item.get("company")) or "Confidencial",
+        "location": location,
+        "mode": clean(item.get("mode")) or "Não informado",
+        "employment_type": clean(item.get("employment_type")),
+        "salary": clean(item.get("salary")),
+        "description": " | ".join(details),
+        "url": url,
+        "source": clean(item.get("source")) or clean(payload.get("source")) or "FGTAS/SINE",
+        "date_posted": clean(item.get("publication_date")) or clean(payload.get("publication_date")),
+        "valid_through": clean(item.get("valid_through")),
+    }
+
+
+def sync_fgtas_live(allow_stale: bool = True, save_json: bool = True) -> dict:
+    """Coleta o painel FGTAS/SINE mais recente e grava direto no banco."""
+    from fgtas_sine import collect as collect_fgtas
+
+    summary = {
+        "jobs_seen": 0,
+        "jobs_added": 0,
+        "errors": [],
+        "edition_date": "",
+    }
+    payload = collect_fgtas(allow_stale=allow_stale)
+    summary["edition_date"] = clean(payload.get("publication_date"))
+    if payload.get("warning"):
+        summary["errors"].append(f"FGTAS/SINE aviso: {payload['warning']}")
+
+    if save_json and summary["edition_date"]:
+        out_path = BASE / f"fgtas_sine_caxias_{summary['edition_date']}.json"
+        try:
+            out_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            summary["errors"].append(f"FGTAS/SINE salvar JSON: {str(exc)[:140]}")
+
+    for item in payload.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        job = _fgtas_item_to_job(item, payload)
+        if not job:
+            continue
+        summary["jobs_seen"] += 1
+        summary["jobs_added"] += upsert(job)
+
+    return summary
 
 
 def _import_fgtas_jobs_unlocked() -> dict:
@@ -1397,37 +1460,12 @@ def _import_fgtas_jobs_unlocked() -> dict:
     for _, path, payload, item, location in newest.values():
         used.add(path.name)
         code = clean(item.get("source_id"))
-        details = [f"Código da vaga FGTAS/SINE: {code}"]
-        desc, instructions = clean(item.get("description")), clean(item.get("application_instructions"))
-        if desc:
-            details.append(desc)
-        if instructions:
-            details.append("COMO SE CANDIDATAR: " + instructions)
-        if item.get("pcd_exclusive"):
-            details.append("Vaga exclusiva para pessoa com deficiência (PCD).")
-        if item.get("no_experience_required"):
-            details.append("Não exige experiência, conforme publicação.")
-        url = clean(item.get("application_url")) or clean(item.get("url"))
-        if not url:
-            safe_code = re.sub(r"[^A-Za-z0-9_-]", "", code)
-            url = f"https://fgtas.invalid/vaga/{safe_code}"
-        if not valid_http_url(url):
-            result["errors"].append(f"{path.name}: URL inválida para vaga {code}.")
+        job = _fgtas_item_to_job(item, payload, default_location=location)
+        if not job:
+            result["errors"].append(f"{path.name}: registro inválido para vaga {code}.")
             continue
         result["jobs_seen"] += 1
-        result["jobs_added"] += upsert({
-            "title": clean(item.get("title")),
-            "company": clean(item.get("company")) or "Confidencial",
-            "location": location,
-            "mode": clean(item.get("mode")) or "Não informado",
-            "employment_type": clean(item.get("employment_type")),
-            "salary": clean(item.get("salary")),
-            "description": " | ".join(details),
-            "url": url,
-            "source": clean(item.get("source")) or clean(payload.get("source")) or "FGTAS/SINE",
-            "date_posted": clean(item.get("publication_date")) or clean(payload.get("publication_date")),
-            "valid_through": clean(item.get("valid_through")),
-        })
+        result["jobs_added"] += upsert(job)
     result["files_used"] = sorted(used)
     return result
 
@@ -1447,7 +1485,6 @@ def import_fgtas_jobs() -> dict:
 
 async def _run_crawl_unlocked() -> dict:
     global CRAWL_METRICS
-    import logging
     logger = logging.getLogger("uvicorn.error")
     CRAWL_METRICS = {"duplicates": 0}
     cfg = config()
@@ -1461,6 +1498,25 @@ async def _run_crawl_unlocked() -> dict:
         "expired_jobs": 0,
         "errors": [],
     }
+
+    try:
+        fgtas_res = await asyncio.to_thread(sync_fgtas_live, True, True)
+        stats["sources_checked"] += 1
+        stats["jobs_seen"] += fgtas_res["jobs_seen"]
+        stats["jobs_added"] += fgtas_res["jobs_added"]
+        stats["errors"].extend(fgtas_res["errors"])
+        logger.info(
+            "ROBÔ fonte FGTAS/SINE (%s): vistas=%s; novas=%s",
+            fgtas_res.get("edition_date") or "sem data",
+            fgtas_res["jobs_seen"],
+            fgtas_res["jobs_added"],
+        )
+    except Exception as exc:
+        stats["errors"].append(f"FGTAS/SINE coleta ao vivo: {str(exc)[:180]}")
+        fallback = await asyncio.to_thread(_import_fgtas_jobs_unlocked)
+        stats["jobs_seen"] += fallback["jobs_seen"]
+        stats["jobs_added"] += fallback["jobs_added"]
+        stats["errors"].extend(fallback["errors"])
 
     headers = {
         "User-Agent": cfg.get(
@@ -1527,7 +1583,7 @@ async def _run_crawl_unlocked() -> dict:
                 stats["errors"].append(
                     f"Ashby {slug}: {str(e)[:180]}"
                 )
-        
+
         for slug in cfg.get("smartrecruiters_companies", []):
             try:
                 t, a = await smartrecruiters(
@@ -1583,7 +1639,7 @@ async def _run_crawl_unlocked() -> dict:
 
             except Exception as e:
                 stats["errors"].append(str(e)[:180])
-        
+
         for url in cfg.get("jsonld_seed_urls", []):
             try:
                 t, a = await crawl_page(client, url, "Página pública")
@@ -1647,8 +1703,6 @@ async def _run_crawl_unlocked() -> dict:
 
         expired = deactivate_expired_jobs()
 
-    # Valida apenas um lote por execução para não sobrecarregar as fontes.
-    # Respostas 404/410 são sinalizadas, mas nunca removem a vaga automaticamente.
     try:
         stats["link_check"] = await check_application_links(200)
     except Exception as exc:
@@ -1702,17 +1756,12 @@ async def run_crawl() -> dict:
 
 async def scheduler():
     """Executa coletas fora do event loop que atende as páginas/API."""
-    import logging
-
     logger = logging.getLogger("uvicorn.error")
-    # Dá prioridade à disponibilidade do site após o deploy.
     await asyncio.sleep(60)
 
     while True:
         try:
             logger.info("ROBÔ: iniciando coleta automática em segundo plano.")
-            # run_crawl cria seu próprio loop assíncrono em uma thread de trabalho;
-            # operações PostgreSQL síncronas não bloqueiam as respostas HTTP.
             result = await asyncio.to_thread(lambda: asyncio.run(run_crawl()))
             if result.get("skipped"):
                 logger.warning("ROBÔ: %s", result["errors"][0])
@@ -1736,7 +1785,6 @@ async def scheduler():
 
 async def background_import_and_scheduler():
     """Importa arquivos FGTAS depois que a API já está disponível."""
-    import logging
     logger = logging.getLogger("uvicorn.error")
     await asyncio.sleep(3)
     try:
@@ -1757,8 +1805,6 @@ async def background_import_and_scheduler():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # A estrutura do banco precisa existir antes das rotas responderem.
-    # A importação de centenas de registros fica fora do caminho crítico do startup.
     await asyncio.to_thread(init_db)
     task = asyncio.create_task(background_import_and_scheduler())
     yield
@@ -1825,8 +1871,6 @@ def jobs(
         like = "%" + q.strip() + "%"
         args.extend([like, like, like])
 
-    # Pesquisa nacional: aceita qualquer UF brasileira e vagas remotas
-    # explicitamente identificadas como elegíveis para o Brasil.
     uf_names = {
         "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas",
         "BA": "Bahia", "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo",
@@ -1853,8 +1897,6 @@ def jobs(
             national_patterns.extend([f"%, {code}%", f"%/{code}%", f"%- {code}%", f"%{state_name}%"])
         national_patterns.extend(["%Brasil%", "%Brazil%"])
         location_parts = ["location ILIKE ?" for _ in national_patterns]
-        # Literais com '%' precisam ser escapados como '%%' porque o psycopg
-        # interpreta '%' como marcador de parâmetros mesmo quando não há valor.
         remote_parts = [
             "description ILIKE '%%Brasil%%'",
             "description ILIKE '%%Brazil%%'",
@@ -1891,10 +1933,6 @@ def jobs(
             args.append(selected)
         terms.append("(" + " OR ".join(mode_parts) + ")")
 
-    # A interface usa cinco categorias estáveis, mas cada fonte publica
-    # employment_type com vocabulários diferentes (PT/EN e com/sem acentos).
-    # Normalizamos acentos no SQL para que "Estágio" também encontre "Estágio",
-    # "estagio" e "Internship", sem alterar os valores originais armazenados.
     normalized_type_sql = (
         "translate(lower(COALESCE(employment_type, '')), "
         "'áàâãäéèêëíìîïóòôõöúùûüç', "
@@ -1916,7 +1954,6 @@ def jobs(
             "%independent contractor%", "%gig%",
         ],
     }
-    # Também aceita variações do próprio rótulo enviado pela interface.
     selected_types = [
         re.sub(r"\s+", " ", x.strip().lower())
         for x in employment_type.split(",") if x.strip()
@@ -2074,6 +2111,7 @@ def download_database_backup(x_crawl_token: str = Header(default="")):
         background=BackgroundTask(os.unlink, backup_path),
     )
 
+
 @app.post("/api/admin/crawl")
 async def manual_crawl(x_crawl_token: str = Header(default="")):
     if not ADMIN_TOKEN:
@@ -2094,8 +2132,15 @@ async def manual_crawl(x_crawl_token: str = Header(default="")):
     return result
 
 
-# Só publica arquivos colocados deliberadamente em /static; nunca expõe
-# main.py, sources.json, .env ou arquivos locais FGTAS/SINE.
 STATIC_DIR = BASE / "static"
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+```[cite: 2]
+
+---
+
+### Resumo do que mudou
+* No `fgtas_sine.py`, `collect(allow_stale=False)` passa a aceitar coleta quando a data do painel difere da data atual, anexando `warning` em vez de abortar quando `allow_stale=True`.
+* No `main.py`, foram adicionados `_fgtas_item_to_job()` e `sync_fgtas_live()`, chamados dentro de `_run_crawl_unlocked()` com fallback automático para `_import_fgtas_jobs_unlocked()` caso a coleta online falhe[cite: 2].
+
+Quer testar isso como está ou ajustar também o *parser* do PDF (`fgtas_sine.py`) com base nos dados que você já tem?
