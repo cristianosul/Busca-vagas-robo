@@ -1,0 +1,25 @@
+- name: Testar conectividade RS e fontes
+        run: |
+          python -u - <<'PY'
+          import socket
+          import httpx
+
+          targets = [
+              ("FGTAS RS - Oportunidades", "fgtas.rs.gov.br", "https://fgtas.rs.gov.br/oportunidade-de-emprego"),
+              ("FGTAS RS - Home", "fgtas.rs.gov.br", "https://fgtas.rs.gov.br/"),
+              ("Gupy API - RS/Brasil", "portal.gupy.io", "https://portal.gupy.io/api/job-search/jobs?jobName=auxiliar&limit=5&offset=0"),
+              ("SmartRecruiters API", "api.smartrecruiters.com", "https://api.smartrecruiters.com/v1/companies/Experian/postings?limit=5"),
+          ]
+
+          headers = {"User-Agent": "BuscaVagasBot/0.1 (+coleta respeitosa de vagas publicas)"}
+
+          for label, host, url in targets:
+              try:
+                  ip = socket.gethostbyname(host)
+                  with socket.create_connection((ip, 443), timeout=10):
+                      pass
+                  resp = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+                  print(f"[OK] {label} ({ip}) -> HTTP {resp.status_code} | bytes={len(resp.content)}")
+              except Exception as exc:
+                  print(f"[FALHA] {label} ({host}) -> {type(exc).__name__}: {exc}")
+          PY
