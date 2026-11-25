@@ -1,5 +1,5 @@
 - name: Inspecionar oportunidade-de-emprego FGTAS RS
-    run: |
+  run: |
           python -u - <<'PY'
           import re
           from bs4 import BeautifulSoup
