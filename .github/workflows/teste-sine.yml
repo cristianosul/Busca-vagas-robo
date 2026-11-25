@@ -1,4 +1,16 @@
-- name: Inspecionar oportunidade-de-emprego FGTAS RS
+name: Teste conectividade RS e fontes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  testar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar dependencias basicas
+        run: python -m pip install httpx beautifulsoup4
+
+      - name: Inspecionar oportunidade-de-emprego FGTAS RS
         run: |
           python -u - <<'PY'
           import re
@@ -14,7 +26,7 @@
           )
           soup = BeautifulSoup(r.text, "html.parser")
           text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
-          print("Título:", soup.title.string.strip() if soup.title and soup.title.string else "sem título")
+          print("Titulo:", soup.title.string.strip() if soup.title and soup.title.string else "sem titulo")
           print("Trecho texto:", text[:800])
 
           links = []
