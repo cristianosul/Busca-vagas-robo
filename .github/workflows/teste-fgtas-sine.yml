@@ -1,4 +1,3 @@
-
 name: Teste isolado FGTAS-SINE
 
 on:
@@ -13,9 +12,9 @@ concurrency:
 
 jobs:
   test-fgtas-sine:
-    name: Testar coletor FGTAS-SINE sem banco
+    name: Diagnosticar e testar coletor FGTAS-SINE sem banco
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Baixar repositório
@@ -31,20 +30,92 @@ jobs:
           python -m pip install --upgrade pip
           pip install "httpx>=0.27,<1" "beautifulsoup4>=4.12,<5" "pypdf>=5,<7"
 
-      - name: Executar teste real do PDF oficial
+      - name: Diagnosticar conexão, baixar e validar PDF oficial
         run: |
           python -u - <<'PY'
           import json
+          import socket
+          import time
           from datetime import datetime
           from pathlib import Path
+          from urllib.parse import urlparse
           from zoneinfo import ZoneInfo
 
+          import httpx
           import fgtas_sine
 
-          print("ETAPA 1: Consultando página oficial FGTAS/SINE...", flush=True)
+          ATTEMPTS = 3
+          BACKOFF_SECONDS = (5, 15, 30)
 
-          with fgtas_sine._client() as client:
-              pdf_url, edition_date = fgtas_sine.find_latest_pdf(client)
+          def network_diagnostic(host):
+              print(f"DIAGNÓSTICO DE REDE: {host}", flush=True)
+              try:
+                  addresses = sorted({
+                      item[4][0]
+                      for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+                  })
+                  print(f"DNS OK: {', '.join(addresses)}", flush=True)
+              except Exception as exc:
+                  print(f"FALHA DNS: {type(exc).__name__}: {exc}", flush=True)
+                  return
+
+              connected = False
+              for address in addresses:
+                  try:
+                      with socket.create_connection((address, 443), timeout=10):
+                          print(f"TCP 443 OK: {address}", flush=True)
+                          connected = True
+                          break
+                  except Exception as exc:
+                      print(f"TCP 443 falhou para {address}: {type(exc).__name__}: {exc}", flush=True)
+              if not connected:
+                  print("DIAGNÓSTICO: não foi possível abrir conexão TCP na porta 443.", flush=True)
+
+          def retry(operation_name, operation, host):
+              last_error = None
+              for attempt in range(1, ATTEMPTS + 1):
+                  print(
+                      f"{operation_name}: tentativa {attempt}/{ATTEMPTS}...",
+                      flush=True
+                  )
+                  try:
+                      return operation()
+                  except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                      last_error = exc
+                      print(
+                          f"{operation_name}: {type(exc).__name__}: {exc}",
+                          flush=True
+                      )
+                      if attempt == 1:
+                          network_diagnostic(host)
+                      if attempt < ATTEMPTS:
+                          delay = BACKOFF_SECONDS[attempt - 1]
+                          print(f"Nova tentativa em {delay}s...", flush=True)
+                          time.sleep(delay)
+              raise RuntimeError(
+                  f"{operation_name} falhou após {ATTEMPTS} tentativas. "
+                  f"Último erro: {type(last_error).__name__}: {last_error}"
+              ) from last_error
+
+          timeout = httpx.Timeout(60.0, connect=20.0)
+          headers = {
+              "User-Agent": fgtas_sine.USER_AGENT,
+              "Accept": "text/html,application/pdf,*/*",
+          }
+
+          print("ETAPA 1: Diagnóstico e consulta da página oficial...", flush=True)
+
+          with httpx.Client(
+              headers=headers,
+              timeout=timeout,
+              follow_redirects=True,
+          ) as client:
+              page_host = urlparse(fgtas_sine.PAGE_URL).hostname
+              pdf_url, edition_date = retry(
+                  "Consulta à página oficial",
+                  lambda: fgtas_sine.find_latest_pdf(client),
+                  page_host,
+              )
 
               print(f"ETAPA 2: Edição encontrada: {edition_date}", flush=True)
               print(f"PDF oficial localizado: {pdf_url}", flush=True)
@@ -55,24 +126,22 @@ jobs:
 
               if edition_date != today:
                   raise RuntimeError(
-                      f"Edição {edition_date} diferente da data atual {today}."
+                      f"Edição {edition_date} diferente da data atual {today}. "
+                      "A validação foi mantida para impedir importar painel antigo."
                   )
 
-              print("ETAPA 3: Baixando PDF oficial...", flush=True)
-              pdf_bytes = fgtas_sine.download_pdf(client, pdf_url)
+              pdf_host = urlparse(pdf_url).hostname
+              print("ETAPA 3: Diagnóstico e download do PDF oficial...", flush=True)
+              pdf_bytes = retry(
+                  "Download do PDF",
+                  lambda: fgtas_sine.download_pdf(client, pdf_url),
+                  pdf_host,
+              )
 
-          print(
-              f"PDF baixado: {len(pdf_bytes)} bytes.",
-              flush=True
-          )
-
+          print(f"PDF baixado: {len(pdf_bytes)} bytes.", flush=True)
           print("ETAPA 4: Extraindo e validando vagas...", flush=True)
 
-          payload = fgtas_sine.parse_jobs(
-              pdf_bytes,
-              edition_date,
-              pdf_url
-          )
+          payload = fgtas_sine.parse_jobs(pdf_bytes, edition_date, pdf_url)
 
           output = Path("resultado-fgtas-sine")
           output.mkdir(exist_ok=True)
@@ -85,18 +154,17 @@ jobs:
 
           print("ETAPA 5: Resultado da extração", flush=True)
           print(f"Registros: {payload['job_records']}", flush=True)
-          print(
-              f"Vagas anunciadas: {payload['announced_openings']}",
-              flush=True
-          )
+          print(f"Vagas anunciadas: {payload['announced_openings']}", flush=True)
           print(f"JSON gerado: {result_file}", flush=True)
           print("TESTE FGTAS/SINE CONCLUÍDO.", flush=True)
           PY
 
       - name: Disponibilizar resultado para conferência
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: resultado-teste-fgtas-sine
           path: resultado-fgtas-sine/*.json
           if-no-files-found: error
           retention-days: 7
+          
