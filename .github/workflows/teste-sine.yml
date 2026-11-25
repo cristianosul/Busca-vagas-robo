@@ -1,23 +1,13 @@
-name: Teste conectividade RS e fontes
-
-on:
-  workflow_dispatch:
-
-jobs:
-  testar:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Instalar dependencias basicas
-        run: python -m pip install httpx beautifulsoup4
-
-      - name: Inspecionar oportunidade-de-emprego FGTAS RS
+- name: Inspecionar boletim de vagas FGTAS RS
         run: |
           python -u - <<'PY'
           import re
+          from urllib.parse import urljoin
           from bs4 import BeautifulSoup
           import httpx
 
-          url = "https://fgtas.rs.gov.br/oportunidade-de-emprego"
+          base = "https://fgtas.rs.gov.br"
+          url = urljoin(base, "/agencias-fgtas-sine-oferecem-6-392-vagas-de-emprego-oferecidas-nas-agencias-fgtas-sine")
           r = httpx.get(
               url,
               timeout=20,
@@ -25,17 +15,14 @@ jobs:
               headers={"User-Agent": "BuscaVagasBot/0.1 (+coleta respeitosa de vagas publicas)"},
           )
           soup = BeautifulSoup(r.text, "html.parser")
-          text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
-          print("Titulo:", soup.title.string.strip() if soup.title and soup.title.string else "sem titulo")
-          print("Trecho texto:", text[:800])
+          article = soup.find("article") or soup.find("main") or soup
+          text = re.sub(r"\n{3,}", "\n\n", article.get_text("\n", strip=True))
+          print("Status:", r.status_code)
+          print("--- TEXTO DO ARTIGO ---")
+          print(text[:3500])
 
-          links = []
-          for a in soup.find_all("a", href=True):
+          print("\n--- LINKS / ANEXOS NO ARTIGO ---")
+          for a in article.find_all("a", href=True):
               label = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
-              href = a["href"]
-              if any(k in (label + " " + href).lower() for k in ("vaga", "emprego", "sine", "fgtas", "boletim", "painel", ".pdf")):
-                  links.append((label[:70], href))
-          print(f"Links relevantes ({len(links)}):")
-          for label, href in links[:25]:
-              print(" -", label, "->", href)
+              print(" -", label[:80], "->", urljoin(base, a["href"]))
           PY
