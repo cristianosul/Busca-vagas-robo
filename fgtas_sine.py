@@ -12,7 +12,6 @@ import json
 import logging
 import re
 import sys
-import time
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -29,10 +28,8 @@ PAGE_URL = (
 ALLOWED_PDF_HOST = "gcpstorage.caxias.rs.gov.br"
 CITY = "Caxias do Sul"
 SOURCE = "FGTAS/SINE Caxias do Sul"
-USER_AGENT = "BuscaVagasBot/0.1 (+coleta respeitosa de vagas publicas)"
+USER_AGENT = "BuscaVagasBot/0.1 (+coleta respeitosa de vagas públicas)"
 MAX_PDF_BYTES = 20 * 1024 * 1024
-MAX_RETRIES = 2
-RETRY_BACKOFF_SECONDS = 2.0
 JOB_START = re.compile(r"(?<!\d)(\d{7})\s*[–—-]\s*")
 SALARY = re.compile(r"R\$\s*[\d.]+,\d{2}(?:\s*(?:A|À)\s*R\$\s*[\d.]+,\d{2})?", re.I)
 
@@ -41,45 +38,17 @@ class CollectionError(RuntimeError):
     pass
 
 
-def _safe_ascii_user_agent(value: str) -> str:
-    cleaned = value.encode("ascii", "ignore").decode("ascii").strip()
-    return cleaned or "BuscaVagasBot/0.1"
-
-
 def _client() -> httpx.Client:
     return httpx.Client(
-        headers={
-            "User-Agent": _safe_ascii_user_agent(USER_AGENT),
-            "Accept": "text/html,application/pdf,*/*",
-        },
-        timeout=httpx.Timeout(45.0, connect=15.0),
+        headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/pdf,*/*"},
+        timeout=30.0,
         follow_redirects=True,
     )
 
 
-def _get_with_retries(client: httpx.Client, url: str, stage: str) -> httpx.Response:
-    last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            response = client.get(url)
-            response.raise_for_status()
-            return response
-        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
-            last_exc = exc
-            is_retryable = isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or (
-                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
-            )
-            if not is_retryable or attempt >= MAX_RETRIES:
-                break
-            time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
-
-    if isinstance(last_exc, httpx.TimeoutException):
-        raise CollectionError(f"Timeout em {stage} ({url}).") from last_exc
-    raise CollectionError(f"Falha em {stage} ({url}): {last_exc}") from last_exc
-
-
 def find_latest_pdf(client: httpx.Client) -> tuple[str, str]:
-    response = _get_with_retries(client, PAGE_URL, "consulta da página oficial")
+    response = client.get(PAGE_URL)
+    response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     page_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
 
@@ -119,36 +88,19 @@ def download_pdf(client: httpx.Client, url: str) -> bytes:
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_PDF_HOST:
         raise CollectionError("O PDF não pertence ao domínio oficial permitido.")
 
-    last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES + 1):
-        chunks = []
-        total = 0
-        try:
-            with client.stream("GET", url) as response:
-                response.raise_for_status()
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > MAX_PDF_BYTES:
-                        raise CollectionError("O PDF excedeu o limite de 20 MB.")
-                    chunks.append(chunk)
-            data = b"".join(chunks)
-            if not data.startswith(b"%PDF"):
-                raise CollectionError("O endereço oficial não retornou um PDF válido.")
-            return data
-        except CollectionError:
-            raise
-        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
-            last_exc = exc
-            is_retryable = isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or (
-                isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
-            )
-            if not is_retryable or attempt >= MAX_RETRIES:
-                break
-            time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
-
-    if isinstance(last_exc, httpx.TimeoutException):
-        raise CollectionError(f"Timeout no download do PDF ({url}).") from last_exc
-    raise CollectionError(f"Falha no download do PDF ({url}): {last_exc}") from last_exc
+    chunks = []
+    total = 0
+    with client.stream("GET", url) as response:
+        response.raise_for_status()
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > MAX_PDF_BYTES:
+                raise CollectionError("O PDF excedeu o limite de 20 MB.")
+            chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data.startswith(b"%PDF"):
+        raise CollectionError("O endereço oficial não retornou um PDF válido.")
+    return data
 
 
 def _pdf_text(pdf_bytes: bytes) -> str:
@@ -189,7 +141,7 @@ def parse_jobs(pdf_bytes: bytes, edition_date: str, pdf_url: str) -> dict:
     seen = set()
     title_end = re.compile(
         r"\s+-\s*(?=(?:OBRIGAT[ÓO]RIO|N[ÃA]O\s+PRECISA|"
-        r"VAGA\s+(?:DE|PARA|EXCLUSIVA|ACEITA)|TRABALHAR|"
+        r"VAGA\s+(?:DE|PARA|EXCLUSIVA|ACEITA|TEMPOR[ÁA]RIA)|TRABALHAR|"
         r"PARA\s+(?:TRABALHAR|ATUAR|AUXILIAR)|EMPRESA\s+BUSCA))",
         re.I,
     )
@@ -261,38 +213,27 @@ def parse_jobs(pdf_bytes: bytes, edition_date: str, pdf_url: str) -> dict:
     }
 
 
-def collect(allow_stale: bool = False) -> dict:
+def collect() -> dict:
     with _client() as client:
         pdf_url, edition_date = find_latest_pdf(client)
         today = datetime.now(ZoneInfo("America/Sao_Paulo")).date().isoformat()
-        stale_warning = None
         if edition_date != today:
-            msg = f"A página anuncia {edition_date}, mas hoje é {today}."
-            if not allow_stale:
-                raise CollectionError(
-                    f"{msg} Coleta interrompida para evitar importar painel antigo."
-                )
-            stale_warning = msg
+            raise CollectionError(
+                f"A página anuncia {edition_date}, mas hoje é {today}. "
+                "Coleta interrompida para evitar importar painel antigo."
+            )
         pdf_bytes = download_pdf(client, pdf_url)
-    payload = parse_jobs(pdf_bytes, edition_date, pdf_url)
-    if stale_warning:
-        payload["warning"] = stale_warning
-    return payload
+    return parse_jobs(pdf_bytes, edition_date, pdf_url)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--stdout", action="store_true")
-    parser.add_argument(
-        "--allow-older",
-        action="store_true",
-        help="Permite coletar mesmo quando a data da edição for diferente de hoje.",
-    )
     args = parser.parse_args()
 
     try:
-        payload = collect(allow_stale=args.allow_older)
+        payload = collect()
         serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
         if args.stdout:
             sys.stdout.write(serialized)
