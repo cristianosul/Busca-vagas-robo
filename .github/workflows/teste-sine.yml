@@ -1,40 +1,64 @@
-name: Inspecionar boletim FGTAS RS
+name: Testar fontes RS e Brasil
 
 on:
   workflow_dispatch:
 
 jobs:
-  inspecionar:
+  testar:
     runs-on: ubuntu-latest
     steps:
       - name: Instalar dependencias
         run: python -m pip install httpx beautifulsoup4
 
-      - name: Inspecionar boletim de vagas FGTAS RS
+      - name: Testar conectividade e estrutura RS e Brasil
         run: |
           python -u - <<'PY'
           import re
-          from urllib.parse import urljoin
+          import socket
+          from urllib.parse import urlparse
           from bs4 import BeautifulSoup
           import httpx
 
-          base = "https://fgtas.rs.gov.br"
-          url = urljoin(base, "/agencias-fgtas-sine-oferecem-6-392-vagas-de-emprego-oferecidas-nas-agencias-fgtas-sine")
-          r = httpx.get(
-              url,
-              timeout=20,
-              follow_redirects=True,
-              headers={"User-Agent": "BuscaVagasBot/0.1 (+coleta respeitosa de vagas publicas)"},
-          )
-          soup = BeautifulSoup(r.text, "html.parser")
-          article = soup.find("article") or soup.find("main") or soup
-          text = re.sub(r"\n{3,}", "\n\n", article.get_text("\n", strip=True))
-          print("Status:", r.status_code)
-          print("--- TEXTO DO ARTIGO ---")
-          print(text[:3500])
+          targets = [
+              # Rio Grande do Sul - portais municipais / estaduais de emprego
+              ("Porto Alegre - Sine Municipal", "https://prefeitura.poa.br/smds/sine-municipal"),
+              ("Bento Goncalves - Balcao de Empregos", "https://bentogoncalves.atende.net/cidadao/pagina/balcao-de-empregos"),
+              ("Novo Hamburgo - Agencia Municipal de Empregos", "https://www.novohamburgo.rs.gov.br/sedec/agencia-municipal-empregos"),
+              ("Canoas - Banco de Oportunidades", "https://www.canoas.rs.gov.br/servicos/banco-de-oportunidades/"),
+              ("Pelotas - Sine", "https://www.pelotas.rs.gov.br/servico/sine"),
+              # Brasil - portais e feeds publicos com vagas reais / JobPosting
+              ("Gupy Portal - Busca Geral Brasil", "https://portal.gupy.io/api/job-search/jobs?jobName=operador&limit=5&offset=0"),
+              ("Gupy Portal - Busca RS", "https://portal.gupy.io/api/job-search/jobs?jobName=auxiliar&state=Rio%20Grande%20do%20Sul&limit=5&offset=0"),
+              ("Vagas.com.br - Sitemap / Lista", "https://www.vagas.com.br/vagas-de-auxiliar"),
+              ("Catho - Lista Publica", "https://www.catho.com.br/vagas/auxiliar/"),
+              ("InfoJobs - Lista Publica", "https://www.infojobs.com.br/empregos.aspx"),
+              ("Trabalha Brasil - Lista Publica", "https://www.trabalhabrasil.com.br/vagas-empregos"),
+          ]
 
-          print("\n--- LINKS / ANEXOS NO ARTIGO ---")
-          for a in article.find_all("a", href=True):
-              label = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
-              print(" -", label[:80], "->", urljoin(base, a["href"]))
+          headers = {
+              "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+              "Accept-Language": "pt-BR,pt;q=0.9",
+          }
+
+          for label, url in targets:
+              host = urlparse(url).hostname
+              try:
+                  ip = socket.gethostbyname(host)
+                  with socket.create_connection((ip, 443), timeout=8):
+                      pass
+                  r = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+                  soup = BeautifulSoup(r.text, "html.parser")
+                  jsonld_count = len(soup.find_all("script", attrs={"type": "application/ld+json"}))
+                  has_jobposting = "JobPosting" in r.text
+                  pdf_links = [
+                      a["href"] for a in soup.find_all("a", href=True)
+                      if ".pdf" in a["href"].lower()
+                  ]
+                  print(
+                      f"[OK] {label} | HTTP {r.status_code} | bytes={len(r.content)} "
+                      f"| jsonld={jsonld_count} | JobPosting={has_jobposting} | pdfs={len(pdf_links)}"
+                  )
+              except Exception as exc:
+                  print(f"[FALHA] {label} ({host}) -> {type(exc).__name__}: {exc}")
           PY
