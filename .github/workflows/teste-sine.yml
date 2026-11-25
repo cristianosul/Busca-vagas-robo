@@ -20,13 +20,8 @@ jobs:
         continue-on-error: true
         run: |
           python -m pip install --upgrade pip
-          pip install "httpx[http2]" curl-cffi
-
-      - name: Executar diagnostico SINE
-        continue-on-error: true
-        run: python -u scripts/diagnostico_sine.py
+          pip install "httpx[http2]" curl-cffi beautifulsoup4
 
       - name: Descobrir rotas FGTAS e portais centralizados SINE/MTE
         continue-on-error: true
         run: python -u scripts/descobrir_fontes_sine.py
-        
