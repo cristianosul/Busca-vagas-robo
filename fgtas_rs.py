@@ -251,7 +251,7 @@ def collect() -> dict:
         interview_opportunities = list(main_interviews)
         checked_articles = []
 
-         for item in list(article_map.values())[:MAX_ARTICLES]:
+        for item in list(article_map.values())[:MAX_ARTICLES]:
             try:
                 html = safe_get(client, item["url"])
                 aggregate, interviews = parse_article(
