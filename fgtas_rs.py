@@ -669,7 +669,7 @@ def self_test() -> None:
     Agência FGTAS/Sine Cachoeira do Sul
     . domingo (22) – 8h – 10 vagas – auxiliar de produção
     Agência FGTAS/Sine Carlos Barbosa (
-    . quarta-feira (25) – 14h – 5 vagas – auxiliar de produção
+    . quarta-feira (27) – 14h – 5 vagas – auxiliar de produção
     """
 
     aggregate = extract_aggregate(
