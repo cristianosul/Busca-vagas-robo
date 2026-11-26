@@ -1,4 +1,3 @@
-Escrita
 #!/usr/bin/env python3
 """Coletor público experimental de informações FGTAS/SINE do RS.
 
