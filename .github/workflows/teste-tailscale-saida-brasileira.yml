@@ -1,0 +1,56 @@
+name: Teste Tailscale - saída brasileira FGTAS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: teste-tailscale-saida-brasileira
+  cancel-in-progress: false
+
+jobs:
+  teste-saida-brasileira:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Conectar GitHub Actions ao Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          ping: 100.90.8.58
+
+      - name: Configurar o celular como saída de internet
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo tailscale set --exit-node=100.90.8.58
+          echo "Exit Node configurado: 100.90.8.58"
+          tailscale status
+
+      - name: Verificar país de saída e acesso à Prefeitura
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ETAPA 1: Verificando país do IP público de saída..."
+          COUNTRY="$(curl --fail --silent --show-error --max-time 30 https://ipinfo.io/country | tr -d '\r\n')"
+          echo "País informado pelo serviço de consulta: ${COUNTRY:-vazio}"
+          if [ "$COUNTRY" != "BR" ]; then
+            echo "::error::A saída não foi identificada como brasileira. País retornado: ${COUNTRY:-vazio}"
+            exit 1
+          fi
+
+          echo "ETAPA 2: Testando página oficial FGTAS/SINE..."
+          PAGE_CODE="$(curl --location --silent --show-error --output /tmp/fgtas-page.html --write-out '%{http_code}' --max-time 45 https://caxias.rs.gov.br/servicos/desenvolvimento-economico/vagas-de-emprego-fgtas-sine)"
+          echo "HTTP da página oficial: $PAGE_CODE"
+          test "$PAGE_CODE" -ge 200 && test "$PAGE_CODE" -lt 400
+
+          echo "ETAPA 3: Testando servidor de PDFs..."
+          PDF_CODE="$(curl --location --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 45 https://gcpstorage.caxias.rs.gov.br/)"
+          echo "HTTP do host de PDFs: $PDF_CODE"
+          test "$PDF_CODE" -ge 200 && test "$PDF_CODE" -lt 500
+
+          echo "SUCESSO: saída identificada como brasileira e destinos testados."
