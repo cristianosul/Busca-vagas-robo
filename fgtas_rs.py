@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -66,11 +67,51 @@ def safe_get(client: httpx.Client, url: str) -> str:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in {ALLOWED_HOST, "fgtas.rs.gov.br"}:
         raise CollectionError(f"URL fora da lista permitida: {url}")
-    response = client.get(url)
-    response.raise_for_status()
-    if len(response.content) > MAX_HTML_BYTES:
-        raise CollectionError(f"Página excedeu {MAX_HTML_BYTES} bytes: {url}")
-    return response.text
+
+    last_error = None
+
+    for attempt in range(1, 4):
+        try:
+            response = client.get(url)
+
+            final_url = urlparse(str(response.url))
+            if final_url.scheme != "https" or final_url.hostname not in {
+                ALLOWED_HOST, "fgtas.rs.gov.br"
+            }:
+                raise CollectionError(
+                    f"Redirecionamento para URL fora da lista permitida: {response.url}"
+                )
+
+            response.raise_for_status()
+
+            if len(response.content) > MAX_HTML_BYTES:
+                raise CollectionError(
+                    f"Página excedeu {MAX_HTML_BYTES} bytes: {url}"
+                )
+
+            return response.text
+
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response.status_code not in {408, 425, 429, 500, 502, 503, 504}:
+                raise
+
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            last_error = exc
+
+        if attempt < 3:
+            wait_seconds = attempt * 3
+            print(
+                f"AVISO: tentativa {attempt}/3 falhou para {url}. "
+                f"Nova tentativa em {wait_seconds}s.",
+                file=sys.stderr,
+            )
+            time.sleep(wait_seconds)
+
+    raise CollectionError(
+        f"Falha após 3 tentativas para {url}: "
+        f"{type(last_error).__name__}: {last_error}"
+    )
 
 
 def get_article_links(html: str, source_url: str) -> list[dict]:
