@@ -1,4 +1,4 @@
-
+Escrita
 #!/usr/bin/env python3
 """Coletor público experimental de informações FGTAS/SINE do RS.
 
@@ -190,7 +190,31 @@ def extract_date(text: str) -> str | None:
         return None
 
 
-def extract_aggregate(text: str, title: str, url: str) -> dict | None:
+def extract_publication_date(html: str) -> str | None:
+    """Prioriza a data explicitamente identificada como Publicação."""
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+
+    publication_label = re.search(
+        r"\bPublicação\s*:",
+        text,
+        re.I,
+    )
+
+    if publication_label:
+        publication_text = text[publication_label.start():]
+        return extract_date(publication_text)
+
+    # Mantém uma alternativa para páginas que não exibem o rótulo.
+    return extract_date(text)
+
+
+def extract_aggregate(
+    text: str,
+    title: str,
+    url: str,
+    publication_date: str | None = None,
+) -> dict | None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     statewide_total = None
 
@@ -237,7 +261,11 @@ def extract_aggregate(text: str, title: str, url: str) -> dict | None:
 
     return {
         "report_title": title,
-        "publication_date": extract_date(text),
+        "publication_date": (
+            publication_date
+            if publication_date is not None
+            else extract_date(text)
+        ),
         "state": "RS",
         "statewide_announced_openings": statewide_total,
         "agency_counts": agency_counts,
@@ -392,11 +420,14 @@ def extract_interviews(
     text: str,
     title: str,
     url: str,
+    publication_date: str | None = None,
 ) -> list[dict]:
     lines = [clean(line) for line in text.splitlines()]
     current_agency = None
     results = []
-    publication_date = extract_date(text)
+
+    if publication_date is None:
+        publication_date = extract_date(text)
 
     for line in lines:
         if not line:
@@ -463,9 +494,22 @@ def parse_article(
 
     text = soup.get_text("\n", strip=True)
 
+    # A mesma data oficial será usada nos agregados e entrevistas.
+    publication_date = extract_publication_date(html)
+
     return (
-        extract_aggregate(text, title, url),
-        extract_interviews(text, title, url),
+        extract_aggregate(
+            text,
+            title,
+            url,
+            publication_date,
+        ),
+        extract_interviews(
+            text,
+            title,
+            url,
+            publication_date,
+        ),
     )
 
 
@@ -511,11 +555,7 @@ def collect() -> dict:
             {
                 "title": "Empregos no RS (página principal)",
                 "url": EMPREGOS_URL,
-                "publication_date": extract_date(
-                    BeautifulSoup(
-                        main_html, "html.parser"
-                    ).get_text(" ", strip=True)
-                ),
+                "publication_date": extract_publication_date(main_html),
                 "individual_interview_records": len(main_interviews),
                 "aggregate_data_found": bool(main_aggregate),
                 "status": "ok",
@@ -524,11 +564,7 @@ def collect() -> dict:
             {
                 "title": "Notícias FGTAS/SINE",
                 "url": NOTICIAS_URL,
-                "publication_date": extract_date(
-                    BeautifulSoup(
-                        news_html, "html.parser"
-                    ).get_text(" ", strip=True)
-                ),
+                "publication_date": extract_publication_date(news_html),
                 "individual_interview_records": 0,
                 "aggregate_data_found": False,
                 "status": "ok",
@@ -554,11 +590,7 @@ def collect() -> dict:
                 checked_articles.append({
                     "title": item["title"],
                     "url": item["url"],
-                    "publication_date": extract_date(
-                        BeautifulSoup(
-                            html, "html.parser"
-                        ).get_text(" ", strip=True)
-                    ),
+                    "publication_date": extract_publication_date(html),
                     "individual_interview_records": len(interviews),
                     "aggregate_data_found": bool(aggregate),
                     "status": "ok",
