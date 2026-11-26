@@ -6,7 +6,6 @@ Não acessa o Emprega Brasil autenticado, não usa gov.br e não grava em banco.
 Separa números agregados de oportunidades de entrevista publicadas.
 Valida datas, dias da semana e nomes dos municípios.
 """
-from __future__ import annotations
 
 import argparse
 import json
