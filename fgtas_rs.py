@@ -362,10 +362,42 @@ def main() -> int:
         print(f"Municípios com registros individuais: {result['individual_municipality_count']}/497")
         print("Nenhum banco de dados foi acessado.")
         return 0
+    
     except (httpx.HTTPError, CollectionError, OSError, ValueError) as exc:
-        print(f"ERRO NA COLETA: {type(exc).__name__}: {exc}", file=sys.stderr)
+        diagnostic = {
+            "collector": "FGTAS/SINE RS - protótipo público",
+            "generated_at_local_date": datetime.now(
+                ZoneInfo("America/Sao_Paulo")
+            ).date().isoformat(),
+            "state": "Rio Grande do Sul",
+            "coverage_status": "collection_error",
+            "aggregate_reports": [],
+            "published_interview_opportunities": [],
+            "checked_articles": [],
+            "error": f"{type(exc).__name__}: {exc}",
+            "important_limit": (
+                "Falha de comunicação durante a coleta. Nenhuma vaga individual "
+                "deve ser considerada confirmada por este diagnóstico."
+            ),
+            "sources": [EMPREGOS_URL, NOTICIAS_URL],
+        }
+
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(f"JSON de diagnóstico gerado: {args.output}")
+
+        except OSError as write_error:
+            print(
+                f"Não foi possível salvar diagnóstico: {write_error}",
+                file=sys.stderr,
+            )
+
+        print(
+            f"ERRO NA COLETA: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
