@@ -251,19 +251,46 @@ def collect() -> dict:
         interview_opportunities = list(main_interviews)
         checked_articles = []
 
-        for item in list(article_map.values())[:MAX_ARTICLES]:
-            html = safe_get(client, item["url"])
-            aggregate, interviews = parse_article(html, item["title"], item["url"])
-            if aggregate:
-                aggregate_reports.append(aggregate)
-            interview_opportunities.extend(interviews)
-            checked_articles.append({
-                "title": item["title"],
-                "url": item["url"],
-                "publication_date": extract_date(BeautifulSoup(html, "html.parser").get_text(" ", strip=True)),
-                "individual_interview_records": len(interviews),
-                "aggregate_data_found": bool(aggregate),
-            })
+         for item in list(article_map.values())[:MAX_ARTICLES]:
+            try:
+                html = safe_get(client, item["url"])
+                aggregate, interviews = parse_article(
+                    html, item["title"], item["url"]
+                )
+
+                if aggregate:
+                    aggregate_reports.append(aggregate)
+
+                interview_opportunities.extend(interviews)
+
+                checked_articles.append({
+                    "title": item["title"],
+                    "url": item["url"],
+                    "publication_date": extract_date(
+                        BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+                    ),
+                    "individual_interview_records": len(interviews),
+                    "aggregate_data_found": bool(aggregate),
+                    "status": "ok",
+                })
+
+            except (httpx.HTTPError, CollectionError, ValueError) as exc:
+                print(
+                    f"AVISO: notícia ignorada após falha: {item['url']} - "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+
+                checked_articles.append({
+                    "title": item["title"],
+                    "url": item["url"],
+                    "publication_date": None,
+                    "individual_interview_records": 0,
+                    "aggregate_data_found": False,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                
 
     # Deduplicar eventos repetidos publicados em mais de uma página.
     unique = {}
