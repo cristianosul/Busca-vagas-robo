@@ -77,4 +77,8 @@ jobs:
 
       - name: Mapear páginas internas e PDFs da FGTAS/RS
         run: python -u scripts/mapear_fgtas_interno.py
+
+      - name: Testar acesso e mapear balcões das prefeituras do RS
+        run: python -u scripts/testar_prefeituras_rs.py
+        
         
