@@ -25,10 +25,13 @@ HEADERS = {
 TARGETS = [
     {
         "municipality": "Caxias do Sul",
-        "url": os.getenv("URL_CAXIAS_FGTAS_SINE", "https://caxias.rs.gov.br/"),
-        "kind": "municipal_portal",
-        "expected": "portal_root",
-        "note": "Portal municipal confirmado. O endereço específico do Balcão de Empregos não foi validado; não usar URL antiga que retornou 404.",
+        "url": os.getenv(
+            "URL_CAXIAS_FGTAS_SINE",
+            "https://caxias.rs.gov.br/servicos/desenvolvimento-economico/vagas-de-emprego-fgtas-sine",
+        ),
+        "kind": "official_employment_publication",
+        "expected": "employment_service",
+        "note": "Página oficial da Prefeitura com publicações de vagas FGTAS/Sine; o painel publicado pode ser PDF e não deve ser confundido com registros individuais extraídos.",
     },
     {
         "municipality": "Novo Hamburgo",
@@ -42,10 +45,14 @@ TARGETS = [
     },
     {
         "municipality": "Bento Gonçalves",
-        "url": os.getenv("URL_BENTO_GONCALVES", "https://bentogoncalves.atende.net/"),
-        "kind": "municipal_portal",
-        "expected": "portal_root",
-        "note": "Portal oficial Atende.Net; não presumir que seja um quadro de vagas.",
+        "url": os.getenv(
+            "URL_BENTO_GONCALVES",
+            "https://bentogoncalves.atende.net/cidadao/pagina/sala-do-empreendedor",
+        ),
+        "fallback_urls": ["https://bentogoncalves.atende.net/"],
+        "kind": "municipal_economic_service",
+        "expected": "municipal_service",
+        "note": "Página Sala do Empreendedor indicada em documento oficial municipal; não é presumida como quadro de vagas. Se falhar, testa também o portal raiz Atende.Net.",
     },
     {
         "municipality": "Canoas",
@@ -120,12 +127,28 @@ def fetch_with_retry(client, url, attempts=4):
 
 
 def inspect_target(client, target):
-    url = target["url"]
+    urls = [target["url"], *target.get("fallback_urls", [])]
+    attempts = []
+    response = None
+    error = None
+    selected_url = target["url"]
+    for candidate_url in urls:
+        selected_url = candidate_url
+        response, error = fetch_with_retry(client, candidate_url)
+        attempts.append({
+            "url": candidate_url,
+            "status": "ok" if error is None else error.split(":")[0],
+            "error": error,
+        })
+        if response is not None:
+            break
+
     item = {
         "municipality": target["municipality"],
         "target_type": target["kind"],
         "expected_classification": target["expected"],
-        "source_url": url,
+        "source_url": target["url"],
+        "attempted_urls": attempts,
         "status": "not_checked",
         "individual_job_records": [],
         "candidate_links": [],
@@ -133,46 +156,35 @@ def inspect_target(client, target):
         "is_confirmed_job_board": False,
         "note": target["note"],
     }
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        item.update(status="invalid_url", error="A URL precisa usar HTTPS e ter host.")
-        return item
-
-    response, error = fetch_with_retry(client, url)
     if error:
         item.update(status=error.split(":")[0], error=error)
         return item
 
     item.update(
-        status="ok",
-        http_status=response.status_code,
-        final_url=str(response.url),
+        status="ok", http_status=response.status_code,
+        successful_url=str(response.url), final_url=str(response.url),
         response_bytes=len(response.content),
     )
     soup = BeautifulSoup(response.text, "html.parser")
     item["page_title"] = clean(soup.title.get_text(" ", strip=True))[:180] if soup.title else ""
 
-    # Apenas links de texto dentro do mesmo domínio oficial. Não extrai uma vaga
-    # de uma simples ocorrência da palavra "emprego" no portal.
     seen = set()
     for anchor in soup.find_all("a", href=True):
         label = clean(anchor.get_text(" ", strip=True))
         href = anchor["href"].strip()
-        if not href.startswith("https://"):
+        if not href.startswith("https://") or not host_allowed(href, selected_url):
             continue
-        if not host_allowed(href, url):
-            continue
-        # Remove fragment and normalize trailing slash for duplicate detection.
         parsed_href = urlparse(href)
-        normalized = parsed_href._replace(fragment="", path=parsed_href.path.rstrip("/") or "/").geturl()
+        normalized = parsed_href._replace(
+            fragment="", path=parsed_href.path.rstrip("/") or "/"
+        ).geturl()
         if normalized in seen:
             continue
         seen.add(normalized)
         combined = f"{label} {href}"
         if PLACEHOLDER_TERMS.search(combined):
             item["excluded_placeholder_links"].append({
-                "title": label[:180],
-                "url": href,
+                "title": label[:180], "url": href,
                 "validation_status": "excluded_placeholder",
                 "reason": "Título ou endereço contém indicação explícita de teste/homologação.",
             })
@@ -181,8 +193,7 @@ def inspect_target(client, target):
             continue
         if JOB_TERMS.search(combined) and label:
             item["candidate_links"].append({
-                "title": label[:180],
-                "url": normalized,
+                "title": label[:180], "url": normalized,
                 "validation_status": "candidate_only_manual_review",
             })
 
@@ -213,7 +224,7 @@ def collect_all(pause=1.0):
                 time.sleep(max(0.0, pause))
 
     return {
-        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.1",
+        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.2",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo",
         "database_written": False,
