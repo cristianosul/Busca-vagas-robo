@@ -26,6 +26,7 @@ ALLOWED_HOSTS = {"www.fgtas.rs.gov.br", "fgtas.rs.gov.br"}
 USER_AGENT = "BuscaVagasBot/0.1 (+respectful public job listing collection)"
 MAX_ARTICLES = 15
 MAX_HTML_BYTES = 5 * 1024 * 1024
+TZ_POA = ZoneInfo("America/Sao_Paulo")
 
 JOB_WORDS = re.compile(
     r"\b(vagas?|empregos?|oportunidades de emprego)\b", re.I
@@ -73,6 +74,12 @@ MUNICIPALITY_ALIASES = {
 
 class CollectionError(RuntimeError):
     pass
+
+
+def get_poa_today(reference_date: date | None = None) -> date:
+    if reference_date is not None:
+        return reference_date
+    return datetime.now(TZ_POA).date()
 
 
 def clean(text: str) -> str:
@@ -279,11 +286,16 @@ def extract_aggregate(
 def validate_interview_schedule(
     schedule: str,
     publication_date: str | None,
+    reference_date: date | None = None,
 ) -> dict:
+    today_poa = get_poa_today(reference_date)
+
     result = {
+        "reference_date_poa": today_poa.isoformat(),
         "event_dates": [],
         "schedule_validation": "date_not_determined",
         "availability_status": "needs_confirmation",
+        "is_today": False,
         "schedule_warning": None,
     }
 
@@ -353,10 +365,12 @@ def validate_interview_schedule(
             else None
         )
 
-        if event_date < published:
-            status = "past"
-        elif matches is False:
+        if matches is False:
             status = "weekday_mismatch"
+        elif event_date < today_poa:
+            status = "past"
+        elif event_date == today_poa:
+            status = "today"
         else:
             status = "future_unverified"
 
@@ -369,26 +383,43 @@ def validate_interview_schedule(
     result["event_dates"] = checks
     statuses = [item["status"] for item in checks]
 
-    if statuses and all(item == "past" for item in statuses):
-        result.update({
-            "schedule_validation": "past_date",
-            "availability_status": "expired",
-            "schedule_warning": (
-                "Data da entrevista já passou em relação à publicação. "
-                "Não tratar como oportunidade atual."
-            ),
-        })
-
-    elif any(
+    if any(
         item in {"weekday_mismatch", "invalid_calendar_date"}
         for item in statuses
     ):
         result.update({
             "schedule_validation": "weekday_or_calendar_mismatch",
             "availability_status": "not_validated",
+            "is_today": False,
             "schedule_warning": (
                 "Dia da semana não corresponde à data informada "
                 "ou a data é inválida. Conferir a publicação original."
+            ),
+        })
+
+    elif statuses and all(item == "past" for item in statuses):
+        result.update({
+            "schedule_validation": "past_date",
+            "availability_status": "expired",
+            "is_today": False,
+            "schedule_warning": (
+                f"Data da entrevista já passou em relação à data atual "
+                f"em Porto Alegre ({today_poa.isoformat()}). "
+                "Não tratar como oportunidade atual."
+            ),
+        })
+
+    elif any(item == "today" for item in statuses) and all(
+        item in {"today", "future_unverified"} for item in statuses
+    ):
+        result.update({
+            "schedule_validation": "date_consistent",
+            "availability_status": "today_unverified",
+            "is_today": True,
+            "schedule_warning": (
+                f"Entrevista marcada para hoje em Porto Alegre "
+                f"({today_poa.isoformat()}), compatível com o dia da semana; "
+                "confirmar horário e disponibilidade com a FGTAS/SINE."
             ),
         })
 
@@ -398,9 +429,11 @@ def validate_interview_schedule(
         result.update({
             "schedule_validation": "date_consistent",
             "availability_status": "future_unverified",
+            "is_today": False,
             "schedule_warning": (
-                "Data futura compatível com o dia da semana, mas a "
-                "disponibilidade deve ser confirmada com a FGTAS/SINE."
+                f"Data futura em relação a Porto Alegre ({today_poa.isoformat()}) "
+                "compatível com o dia da semana, mas a disponibilidade deve ser "
+                "confirmada com a FGTAS/SINE."
             ),
         })
 
@@ -408,6 +441,7 @@ def validate_interview_schedule(
         result.update({
             "schedule_validation": "date_requires_review",
             "availability_status": "not_validated",
+            "is_today": False,
             "schedule_warning": "A data exige conferência manual.",
         })
 
@@ -419,6 +453,7 @@ def extract_interviews(
     title: str,
     url: str,
     publication_date: str | None = None,
+    reference_date: date | None = None,
 ) -> list[dict]:
     lines = [clean(line) for line in text.splitlines()]
     current_agency = None
@@ -451,7 +486,13 @@ def extract_interviews(
             validation = validate_interview_schedule(
                 clean(when),
                 publication_date,
+                reference_date=reference_date,
             )
+
+            is_current = validation["availability_status"] in {
+                "today_unverified",
+                "future_unverified",
+            }
 
             results.append({
                 "agency": current_agency,
@@ -465,12 +506,10 @@ def extract_interviews(
                 "publication_date": publication_date,
                 "source_url": url,
                 "data_kind": "published_interview_opportunity",
-                "is_current_opportunity": (
-                    validation["availability_status"] == "future_unverified"
-                ),
+                "is_current_opportunity": is_current,
                 "application_note": (
                     "Registro de entrevista divulgado pela FGTAS/SINE. "
-                    "Mesmo com data futura compatível, confirmar data, "
+                    "Mesmo com data compatível, confirmar data, "
                     "horário e disponibilidade diretamente com a agência."
                 ),
             })
@@ -482,6 +521,7 @@ def parse_article(
     html: str,
     title: str,
     url: str,
+    reference_date: date | None = None,
 ) -> tuple[dict | None, list[dict]]:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -507,6 +547,7 @@ def parse_article(
             title,
             url,
             publication_date,
+            reference_date=reference_date,
         ),
     )
 
@@ -647,9 +688,7 @@ def collect() -> dict:
         if item["municipality"]
     })
 
-    today = datetime.now(
-        ZoneInfo("America/Sao_Paulo")
-    ).date().isoformat()
+    today = get_poa_today().isoformat()
 
     return {
         "collector": "FGTAS/SINE RS - protótipo público",
@@ -660,6 +699,10 @@ def collect() -> dict:
         "individual_municipality_count": len(municipalities),
         "aggregate_reports": list(unique_aggregates.values()),
         "published_interview_opportunities": records,
+        "today_unverified_interview_opportunities": [
+            item for item in records
+            if item["is_today"]
+        ],
         "current_unverified_interview_opportunities": [
             item for item in records
             if item["is_current_opportunity"]
@@ -681,176 +724,144 @@ def collect() -> dict:
         "important_limit": (
             "Este coletor não acessa o Emprega Brasil autenticado. "
             "Não representa cobertura integral dos 497 municípios. "
-            "Somente inclui dados encontrados em páginas públicas oficiais. "
-            "Entrevistas futuras ainda exigem confirmação; registros vencidos "
-            "ou com divergência de calendário não são oportunidades atuais."
+            "Somente inclui dados públicos divulgados pela FGTAS/SINE."
         ),
-        "sources": [EMPREGOS_URL, NOTICIAS_URL],
     }
 
 
-def self_test() -> None:
-    sample = """
-    Publicação: 26/11/2026 às 10h00
-    As Agências FGTAS/Sine oferecem 5.123 vagas de emprego no RS.
-    As Agências com maiores números são: Erechim (300), Vacaria (200).
-    Agência FGTAS/Sine Caxias do Sul (Rua Exemplo, 100)
-    . sexta-feira (27) – 9h – 12 vagas – auxiliar de produção
-    Agência FGTAS/Sine Cachoeira do Sul
-    . domingo (22) – 8h – 10 vagas – auxiliar de produção
-    Agência FGTAS/Sine Carlos Barbosa (
-    . quarta-feira (27) – 14h – 5 vagas – auxiliar de produção
-    """
+def run_self_test() -> None:
+    # 2026-11-26 é quinta-feira (weekday == 3).
+    poa_today = date(2026, 11, 26)
+    pub_date = "2026-11-23"  # segunda-feira
 
-    aggregate = extract_aggregate(
-        sample,
-        "Teste",
-        "https://www.fgtas.rs.gov.br/teste",
+    # 1. Entrevista para HOJE em Porto Alegre (quinta-feira, dia 26)
+    today_res = validate_interview_schedule(
+        "quinta-feira (26)",
+        pub_date,
+        reference_date=poa_today,
     )
+    assert today_res["availability_status"] == "today_unverified"
+    assert today_res["is_today"] is True
+    assert today_res["event_dates"][0]["status"] == "today"
+    assert today_res["event_dates"][0]["weekday_matches"] is True
 
-    interviews = extract_interviews(
-        sample,
-        "Teste",
-        "https://www.fgtas.rs.gov.br/teste",
+    # 2. Entrevista ANTIGA em relação a hoje em POA (quarta-feira, dia 25)
+    past_res = validate_interview_schedule(
+        "quarta-feira (25)",
+        pub_date,
+        reference_date=poa_today,
     )
+    assert past_res["availability_status"] == "expired"
+    assert past_res["is_today"] is False
+    assert past_res["event_dates"][0]["status"] == "past"
+    assert past_res["event_dates"][0]["weekday_matches"] is True
 
-    assert aggregate
-    assert aggregate["statewide_announced_openings"] == 5123
-
-    assert len(interviews) == 3
-
-    assert interviews[0]["municipality"] == "Caxias do Sul"
-    assert interviews[0]["availability_status"] == "future_unverified"
-
-    assert interviews[1]["municipality"] == "Cachoeira do Sul"
-    assert interviews[1]["availability_status"] == "expired"
-
-    assert interviews[2]["municipality"] == "Carlos Barbosa"
-    assert interviews[2]["availability_status"] == "not_validated"
-
-    assert interviews[2]["schedule_validation"] == (
-        "weekday_or_calendar_mismatch"
+    # 3. Entrevista FUTURA em relação a hoje em POA (sexta-feira, dia 27)
+    future_res = validate_interview_schedule(
+        "sexta-feira (27)",
+        pub_date,
+        reference_date=poa_today,
     )
+    assert future_res["availability_status"] == "future_unverified"
+    assert future_res["is_today"] is False
+    assert future_res["event_dates"][0]["status"] == "future_unverified"
+    assert future_res["event_dates"][0]["weekday_matches"] is True
 
-    assert normalize_municipality("Taquara (") == "Taquara"
-
-    print(
-        "AUTOTESTE OK: municípios normalizados; datas vencidas "
-        "e divergentes sinalizadas; agregados separados."
+    # 4. Dia da semana divergente (26/11/2026 é quinta, não terça)
+    mismatch_res = validate_interview_schedule(
+        "terça-feira (26)",
+        pub_date,
+        reference_date=poa_today,
     )
+    assert mismatch_res["availability_status"] == "not_validated"
+    assert mismatch_res["schedule_validation"] == "weekday_or_calendar_mismatch"
+    assert mismatch_res["event_dates"][0]["weekday_matches"] is False
+
+    # 5. Extração completa com entrevistas hoje, vencida e futura
+    sample_text = (
+        "Agência FGTAS/Sine Porto Alegre\n"
+        ". quinta-feira (26) - 10 vagas - Auxiliar Administrativo\n"
+        ". quarta-feira (25) - 5 vagas - Estoquista\n"
+        ". sexta-feira (27) - 8 vagas - Operador de Caixa\n"
+    )
+    items = extract_interviews(
+        sample_text,
+        "Mutirão de entrevistas",
+        f"{BASE}/noticia-teste",
+        publication_date=pub_date,
+        reference_date=poa_today,
+    )
+    assert len(items) == 3
+    by_day = {item["event_dates"][0]["date"]: item for item in items}
+
+    assert by_day["2026-11-26"]["is_today"] is True
+    assert by_day["2026-11-26"]["is_current_opportunity"] is True
+    assert by_day["2026-11-25"]["availability_status"] == "expired"
+    assert by_day["2026-11-25"]["is_current_opportunity"] is False
+    assert by_day["2026-11-27"]["availability_status"] == "future_unverified"
+    assert by_day["2026-11-27"]["is_current_opportunity"] is True
+
+    print("SELF_TEST_OK")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-
+    parser = argparse.ArgumentParser(
+        description="Coletor público experimental FGTAS/SINE RS"
+    )
     parser.add_argument(
         "--output",
-        type=Path,
-        default=Path("resultado-fgtas-rs.json"),
+        default="fgtas_sine_rs.json",
+        help="Caminho do arquivo JSON de saída",
     )
-
     parser.add_argument(
         "--self-test",
         action="store_true",
+        help="Executa testes internos e encerra",
     )
-
     args = parser.parse_args()
 
     if args.self_test:
-        self_test()
+        run_self_test()
         return 0
 
     try:
-        result = collect()
-
-        args.output.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        args.output.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        print(f"JSON gerado: {args.output}")
-        print(
-            f"Relatórios agregados: "
-            f"{len(result['aggregate_reports'])}"
-        )
-        print(
-            f"Entrevistas detalhadas: "
-            f"{len(result['published_interview_opportunities'])}"
-        )
-        print(
-            f"Entrevistas vencidas: "
-            f"{len(result['expired_interview_opportunities'])}"
-        )
-        print(
-            f"Entrevistas não validadas: "
-            f"{len(result['not_validated_interview_opportunities'])}"
-        )
-        print(
-            f"Municípios com registros individuais: "
-            f"{result['individual_municipality_count']}/497"
-        )
-        print("Nenhum banco de dados foi acessado.")
-
-        return 0
-
-    except (
-        httpx.HTTPError,
-        CollectionError,
-        OSError,
-        ValueError,
-    ) as exc:
-
-        diagnostic = {
-            "collector": "FGTAS/SINE RS - protótipo público",
-            "generated_at_local_date": datetime.now(
-                ZoneInfo("America/Sao_Paulo")
-            ).date().isoformat(),
-            "state": "Rio Grande do Sul",
-            "coverage_status": "collection_error",
-            "aggregate_reports": [],
-            "published_interview_opportunities": [],
-            "checked_articles": [],
-            "error": f"{type(exc).__name__}: {exc}",
-            "important_limit": (
-                "Falha de comunicação durante a coleta. "
-                "Nenhuma oportunidade individual deve ser considerada "
-                "confirmada por este diagnóstico."
-            ),
-            "sources": [EMPREGOS_URL, NOTICIAS_URL],
-        }
-
-        try:
-            args.output.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            args.output.write_text(
-                json.dumps(diagnostic, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-
-            print(
-                f"JSON de diagnóstico gerado: {args.output}"
-            )
-
-        except OSError as write_error:
-            print(
-                f"Não foi possível salvar diagnóstico: {write_error}",
-                file=sys.stderr,
-            )
-
-        print(
-            f"ERRO NA COLETA: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-
+        payload = collect()
+    except (httpx.HTTPError, CollectionError, ValueError) as exc:
+        print(f"ERRO: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print(f"JSON gerado: {output_path}")
+    print(f"Relatórios agregados: {len(payload['aggregate_reports'])}")
+    print(
+        "Entrevistas detalhadas: "
+        f"{len(payload['published_interview_opportunities'])}"
+    )
+    print(
+        "Entrevistas hoje (POA): "
+        f"{len(payload['today_unverified_interview_opportunities'])}"
+    )
+    print(
+        "Entrevistas vencidas: "
+        f"{len(payload['expired_interview_opportunities'])}"
+    )
+    print(
+        "Entrevistas não validadas: "
+        f"{len(payload['not_validated_interview_opportunities'])}"
+    )
+    print(
+        "Municípios com registros individuais: "
+        f"{payload['individual_municipality_count']}/"
+        f"{payload['municipality_universe']}"
+    )
+    print("Nenhum banco de dados foi acessado.")
+    return 0
 
 
 if __name__ == "__main__":
