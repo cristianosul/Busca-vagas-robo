@@ -2,17 +2,19 @@
 """Diagnóstico conservador de serviços públicos de emprego no RS; não grava em banco."""
 
 import argparse
+import io
 import json
 import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
+from pypdf import PdfReader
 
 TZ_POA = ZoneInfo("America/Sao_Paulo")
 HEADERS = {
@@ -49,10 +51,13 @@ TARGETS = [
             "URL_BENTO_GONCALVES",
             "https://bentogoncalves.atende.net/cidadao/pagina/sala-do-empreendedor",
         ),
-        "fallback_urls": ["https://bentogoncalves.atende.net/"],
+        "fallback_urls": [
+            "https://bentogoncalves.atende.net/",
+            "https://www.bentogoncalves.rs.gov.br/",
+        ],
         "kind": "municipal_economic_service",
         "expected": "municipal_service",
-        "note": "Página Sala do Empreendedor indicada em documento oficial municipal; não é presumida como quadro de vagas. Se falhar, testa também o portal raiz Atende.Net.",
+        "note": "Página Sala do Empreendedor indicada em documento oficial municipal; não é presumida como quadro de vagas. Se falhar, testa o portal raiz Atende.Net e a página inicial oficial da Prefeitura.",
     },
     {
         "municipality": "Canoas",
@@ -75,6 +80,8 @@ TARGETS = [
 
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 MAX_HTML_BYTES = 4 * 1024 * 1024
+MAX_PDF_BYTES = 20 * 1024 * 1024
+MAX_PDFS_PER_PAGE = 3
 PLACEHOLDER_TERMS = re.compile(r"\b(teste|testes|homologacao|homologação|ambiente de teste)\b", re.I)
 CULTURE_EXCLUSIONS = re.compile(
     r"\b(pnab|cultura|cultural|artista|artes[aã]o|edital cultural|"
@@ -126,6 +133,94 @@ def fetch_with_retry(client, url, attempts=4):
     return None, "request_failed_after_retries"
 
 
+def fetch_pdf(client, url, original_url):
+    """Baixa somente PDF HTTPS do mesmo domínio oficial/subdomínio da página."""
+    if not host_allowed(url, original_url):
+        raise ValueError("PDF fora do domínio oficial permitido")
+    response = client.get(url)
+    if not host_allowed(str(response.url), url):
+        raise ValueError("Redirecionamento do PDF para domínio não permitido")
+    response.raise_for_status()
+    if len(response.content) > MAX_PDF_BYTES:
+        raise ValueError(f"PDF excede o limite de {MAX_PDF_BYTES} bytes")
+    if not response.content.startswith(b"%PDF"):
+        raise ValueError("O documento vinculado não possui assinatura PDF")
+    return response.content
+
+def parse_caxias_pdf(pdf_bytes, title, url):
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages = [(page.extract_text() or "") for page in reader.pages]
+    full_text = "\n".join(pages)
+    compact = re.sub(r"[ \t]+", " ", full_text)
+    date_match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", compact)
+    publication_date = None
+    if date_match:
+        try:
+            from datetime import datetime as _dt
+            publication_date = _dt.strptime(date_match.group(1), "%d/%m/%Y").date().isoformat()
+        except ValueError:
+            publication_date = None
+    total_match = re.search(r"oferece\s+(\d{1,4})\s+vagas?", compact, re.I)
+    declared_total = int(total_match.group(1)) if total_match else None
+    # Cada registro começa com código de sete dígitos; a próxima ocorrência inicia o seguinte.
+    starts = list(re.finditer(r"(?m)^[^\w\r\n]*(\d{7})\s*[–—-]\s*", full_text))
+    records = []
+    for index, match in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(full_text)
+        block = re.sub(r"\s+", " ", full_text[match.start():end]).strip(" •▪\t\r\n\x7f")
+        code_match = re.match(r"(\d{7})\s*[–—-]\s*(.*)", block)
+        if not code_match:
+            continue
+        code, remainder = code_match.groups()
+        title_match = re.match(r"(.{2,140}?)(?:\s*[-–—]\s*)(.+)$", remainder)
+        job_title = title_match.group(1).strip(" -–—") if title_match else remainder[:140].strip()
+        description = title_match.group(2).strip() if title_match else remainder
+        salary_match = re.search(r"R\$\s*[\d.]+,\d{2}(?:\s*(?:A\s*HORA|/HORA))?", description, re.I)
+        records.append({
+            "source_id": code, "title": job_title,
+            "company": "Confidencial (vaga intermediada pelo FGTAS/SINE)",
+            "location": "Caxias do Sul, RS", "mode": "Presencial",
+            "employment_type": "Não informado", "salary": salary_match.group(0) if salary_match else None,
+            "description": description, "source": "FGTAS/SINE Caxias do Sul",
+            "source_document": title, "publication_date": publication_date,
+            "application_url": None, "application_instructions":
+                "Anote o código da vaga e confirme a disponibilidade diretamente na agência FGTAS/SINE. O painel orienta atendimento na Rua Bento Gonçalves, 1901, Caxias do Sul.",
+            "data_kind": "individual_job_record",
+            "availability_status": "needs_confirmation",
+            "is_current_opportunity": False,
+            "source_url": url,
+        })
+    return {
+        "title": title[:180], "url": url, "content_type": "application/pdf",
+        "download_status": "ok", "pages": len(reader.pages),
+        "extracted_text_characters": len(full_text),
+        "publication_date": publication_date,
+        "declared_vacancy_total": declared_total,
+        "parsed_individual_records": len(records),
+        "extraction_status": "text_extracted" if full_text.strip() else "no_text_extracted",
+    }, records
+
+def extract_pdf_links(soup, page_url):
+    found = {}
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(page_url, anchor["href"].strip())
+        parsed = urlparse(href)
+        label = clean(anchor.get_text(" ", strip=True)) or "Documento PDF"
+        if label.casefold() in {"abrir no navegador", "download"}:
+            label = "Painel de vagas FGTAS/SINE Caxias do Sul"
+        if parsed.scheme == "https" and parsed.path.lower().endswith(".pdf") and host_allowed(href, page_url):
+            found[href] = label
+    for frame in soup.find_all(["iframe", "embed", "object"]):
+        href = frame.get("src") or frame.get("data")
+        if not href:
+            continue
+        absolute = urljoin(page_url, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme == "https" and parsed.path.lower().endswith(".pdf") and host_allowed(absolute, page_url):
+            found.setdefault(absolute, "Documento PDF incorporado")
+    return list(found.items())[:MAX_PDFS_PER_PAGE]
+
+
 def inspect_target(client, target):
     urls = [target["url"], *target.get("fallback_urls", [])]
     attempts = []
@@ -153,6 +248,7 @@ def inspect_target(client, target):
         "individual_job_records": [],
         "candidate_links": [],
         "excluded_placeholder_links": [],
+        "documents": [],
         "is_confirmed_job_board": False,
         "note": target["note"],
     }
@@ -167,6 +263,21 @@ def inspect_target(client, target):
     )
     soup = BeautifulSoup(response.text, "html.parser")
     item["page_title"] = clean(soup.title.get_text(" ", strip=True))[:180] if soup.title else ""
+
+    # A página de Caxias publica o painel em PDF. Extrair o documento, não apenas os links HTML.
+    if target["municipality"] == "Caxias do Sul":
+        for pdf_url, pdf_title in extract_pdf_links(soup, str(response.url)):
+            try:
+                pdf_bytes = fetch_pdf(client, pdf_url, str(response.url))
+                doc, pdf_records = parse_caxias_pdf(pdf_bytes, pdf_title, pdf_url)
+                item["documents"].append(doc)
+                item["individual_job_records"].extend(pdf_records)
+            except Exception as exc:
+                item["documents"].append({
+                    "title": pdf_title[:180], "url": pdf_url,
+                    "download_status": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     seen = set()
     for anchor in soup.find_all("a", href=True):
@@ -224,7 +335,7 @@ def collect_all(pause=1.0):
                 time.sleep(max(0.0, pause))
 
     return {
-        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.2",
+        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.3",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo",
         "database_written": False,
@@ -239,12 +350,14 @@ def collect_all(pause=1.0):
             "excluded_placeholder_links": sum(len(x["excluded_placeholder_links"]) for x in results),
             "confirmed_job_boards": sum(bool(x["is_confirmed_job_board"]) for x in results),
             "individual_job_records": sum(len(x["individual_job_records"]) for x in results),
+            "pdf_documents_found": sum(len(x["documents"]) for x in results),
+            "pdf_documents_extracted": sum(1 for x in results for d in x["documents"] if d.get("extraction_status") == "text_extracted"),
         },
         "municipalities": results,
         "rule": (
             "Portais, serviços e plataformas são classificados separadamente. "
             "Links com indicação de teste/homologação são excluídos; demais links seguem "
-            "como candidatos para revisão manual e nunca viram vaga individual automaticamente."
+            "como candidatos para revisão manual. PDFs oficiais podem ser extraídos; cada registro continua marcado para confirmação, sem presumir disponibilidade atual."
         ),
     }
 
