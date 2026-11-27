@@ -85,5 +85,15 @@ jobs:
         run: |
           python -u scripts/testar_prefeituras_rs.py > prefeituras_rs.txt 2>&1 || true
           cat prefeituras_rs.txt
+
+      - name: Testar acesso e mapear balcões das prefeituras do RS
+        run: python -u scripts/testar_prefeituras_rs.py | tee prefeituras_rs.txt
+
+      - name: Baixar resultado prefeituras
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-prefeituras-rs
+          path: prefeituras_rs.txt
           
         
