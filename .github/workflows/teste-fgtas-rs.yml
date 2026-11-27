@@ -74,20 +74,21 @@ jobs:
           mkdir -p resultado-fgtas-rs
           python -u fgtas_rs.py --output resultado-fgtas-rs/fgtas_sine_rs.json
 
-      - name: Validar regras municipais V3.1 sem rede
+      - name: Validar regras municipais V3.2 sem rede
         run: python -u scripts/testar_prefeituras_rs.py
 
-      - name: Coletar diagnóstico municipal V3.1
+      - name: Coletar diagnóstico municipal V3.2
         run: python -u scripts/coletar_prefeituras_rs.py --pause 1 --output resultado-fgtas-rs/prefeituras_rs.json
 
       - name: Disponibilizar resultados para auditoria
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: resultado-fgtas-sine-rs-v3-1
+          name: resultado-fgtas-sine-rs-v3-2
           path: |
             resultado-fgtas-rs/*.json
             prefeituras_rs.txt
           if-no-files-found: warn
           retention-days: 7
           compression-level: 6
+          
