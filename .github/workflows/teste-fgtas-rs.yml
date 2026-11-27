@@ -101,5 +101,18 @@ jobs:
           URL_CAXIAS_FGTAS_SINE: "https://caxias.rs.gov.br/..."
           URL_NOVO_HAMBURGO_FGTAS_SINE: "https://www.novohamburgo.rs.gov.br/..."
         run: python -u scripts/coletar_prefeituras_rs.py --output resultado-fgtas-rs/prefeituras_rs.json
-        
+
+      - name: Coletar oportunidades municipais RS
+        env:
+          URL_CAXIAS_FGTAS_SINE: "COLE_A_URL_REAL_DE_CAXIAS_AQUI"
+          URL_NOVO_HAMBURGO_FGTAS_SINE: "COLE_A_URL_REAL_DE_NOVO_HAMBURGO_AQUI"
+        run: python -u scripts/coletar_prefeituras_rs.py --output resultado-fgtas-rs/prefeituras_rs.json
+
+      - name: Upload dos resultados FGTAS e Prefeituras RS
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultado-fgtas-rs
+          path: resultado-fgtas-rs/
+
         
