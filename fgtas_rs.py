@@ -72,10 +72,20 @@ def extract_publication_date(html):
     return extract_date(text[match.start():match.start() + 120]) if match else extract_date(text[:500])
 
 
-def normalize_municipality(value):
-    value = clean(value).strip(" ()-:;,")
+MUNICIPALITY_ALIASES = {
+    # Fragmento observado no texto extraído do relatório FGTAS de 2026.
+    "cachoeira do s": "Cachoeira do Sul",
+}
+
+def normalize_agency_name(value):
+    """Remove pontuação/parênteses soltos no fim do nome da agência."""
+    value = clean(value)
     value = re.sub(r"\s*\([^)]*$", "", value).strip()
-    return value
+    return value.strip(" -:;,()")
+
+def normalize_municipality(value):
+    value = normalize_agency_name(value)
+    return MUNICIPALITY_ALIASES.get(value.casefold(), value)
 
 
 def safe_get(client, url):
@@ -187,7 +197,7 @@ def extract_interviews(text, title, url, publication_date=None, reference_date=N
             continue
         agency = AGENCY_RE.match(line)
         if agency:
-            current_agency = clean(agency.group(1)).strip(" -:")
+            current_agency = normalize_agency_name(agency.group(1))
             continue
         bullet = BULLET_RE.match(line)
         if bullet and current_agency:
@@ -237,35 +247,61 @@ def parse_article(html, title, url, reference_date=None):
             extract_interviews(text, title, url, pub_date, reference_date))
 
 
+def canonical_page_url(url):
+    """Normaliza URL para deduplicação sem remover parâmetros funcionais."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/") or "/"
+    return parsed._replace(
+        scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower(),
+        path=path, fragment="",
+    ).geturl()
+
+
 def collect():
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
     timeout = httpx.Timeout(35.0, connect=15.0)
-    aggregates, interviews, checked, errors = [], [], [], []
+    aggregates, interviews, errors = [], [], []
+    checked_by_url = {}
     with httpx.Client(headers=headers, timeout=timeout, follow_redirects=True) as client:
         for index_url, index_title in [(EMPREGOS_URL, "Empregos no RS"), (NOTICIAS_URL, "Notícias FGTAS/SINE")]:
+            canonical_index = canonical_page_url(index_url)
+            if canonical_index in checked_by_url:
+                continue
             try:
                 html = safe_get(client, index_url)
-                checked.append({"title": index_title, "url": index_url, "status": "ok"})
+                checked_by_url[canonical_index] = {
+                    "title": index_title, "url": index_url, "status": "ok"
+                }
                 if index_url == EMPREGOS_URL:
                     agg, records = parse_article(html, index_title, index_url)
                     if agg: aggregates.append(agg)
                     interviews.extend(records)
                 for item in get_article_links(html, index_url):
-                    if len({x["url"] for x in checked}) >= MAX_ARTICLES + 2:
+                    canonical = canonical_page_url(item["url"])
+                    if canonical in checked_by_url:
+                        continue
+                    if len(checked_by_url) >= MAX_ARTICLES + 2:
                         break
                     try:
                         article = safe_get(client, item["url"])
                         agg, records = parse_article(article, item["title"], item["url"])
                         if agg: aggregates.append(agg)
                         interviews.extend(records)
-                        checked.append({"title": item["title"], "url": item["url"], "status": "ok"})
+                        checked_by_url[canonical] = {
+                            "title": item["title"], "url": item["url"], "status": "ok"
+                        }
                     except Exception as exc:
                         errors.append({"url": item["url"], "error": f"{type(exc).__name__}: {exc}"})
-                        checked.append({"title": item["title"], "url": item["url"], "status": "error"})
+                        checked_by_url[canonical] = {
+                            "title": item["title"], "url": item["url"], "status": "error"
+                        }
             except Exception as exc:
                 errors.append({"url": index_url, "error": f"{type(exc).__name__}: {exc}"})
-                checked.append({"title": index_title, "url": index_url, "status": "error"})
+                checked_by_url[canonical_index] = {
+                    "title": index_title, "url": index_url, "status": "error"
+                }
 
+    checked = list(checked_by_url.values())
     unique = {}
     for item in interviews:
         key = (item["agency"], item["schedule_or_date"], item["announced_openings"],
@@ -274,10 +310,12 @@ def collect():
     aggregates_unique = {x["source_url"]: x for x in aggregates}
     records = list(unique.values())
     return {
-        "source": "FGTAS/SINE RS", "generated_at_poa": datetime.now(TZ_POA).isoformat(),
+        "source": "FGTAS/SINE RS - diagnóstico V3.2",
+        "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo", "database_written": False,
         "summary": {
-            "checked_pages": len(checked), "aggregate_reports": len(aggregates_unique),
+            "checked_pages": len(checked),
+            "aggregate_reports": len(aggregates_unique),
             "interview_records": len(records),
             "current_unverified_interviews": sum(x["is_current_opportunity"] for x in records),
             "expired_interviews": sum(x["availability_status"] == "expired" for x in records),
@@ -290,6 +328,7 @@ def collect():
             "Entrevistas não equivalem automaticamente a vagas abertas.",
             "Datas futuras permanecem não verificadas até confirmação com a agência.",
             "Relatórios agregados não são convertidos em vagas individuais.",
+            "Nomes truncados são normalizados apenas quando há correspondência explícita; o texto original não é tratado como confirmação adicional.",
         ],
     }
 
@@ -301,9 +340,12 @@ def self_test():
     assert expired["availability_status"] == "expired"
     mismatch = validate_interview_schedule("segunda-feira (17)", "2026-04-17", date(2026, 4, 1))
     assert mismatch["availability_status"] == "not_validated"
-    assert normalize_municipality("Carlos Barbosa (") == "Carlos Barbosa"
+    assert normalize_agency_name("Carlos Barbosa (") == "Carlos Barbosa"
+    assert normalize_agency_name("Taquara (") == "Taquara"
+    assert normalize_municipality("Cachoeira do S") == "Cachoeira do Sul"
+    assert canonical_page_url("https://www.fgtas.rs.gov.br/noticias/#top") == "https://www.fgtas.rs.gov.br/noticias"
     assert extract_aggregate("Rio Grande do Sul\n5.401 vagas", "Teste", "https://www.fgtas.rs.gov.br/x")
-    print("Autoteste FGTAS/SINE RS: OK")
+    print("Autoteste FGTAS/SINE RS V3.2: OK")
 
 
 def main():
