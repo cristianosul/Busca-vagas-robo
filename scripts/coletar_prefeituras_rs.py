@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnóstico conservador de serviços públicos de emprego no RS; não grava em banco."""
+"""Diagnóstico conservador FGTAS/SINE RS V3.4; não grava em banco."""
 
 import argparse
 import io
@@ -147,6 +147,46 @@ def fetch_pdf(client, url, original_url):
         raise ValueError("O documento vinculado não possui assinatura PDF")
     return response.content
 
+def parse_job_records_from_text(full_text, title, url, publication_date=None):
+    """Extrai apenas blocos com código de vaga de sete dígitos; não usa total agregado como registros."""
+    starts = list(re.finditer(r"(?m)(?<!\d)(\d{7})\s*[–—-]\s*", full_text or ""))
+    records, seen_codes = [], set()
+    for index, match in enumerate(starts):
+        code = match.group(1)
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(full_text)
+        block = re.sub(r"\s+", " ", full_text[match.start():end]).strip(" •▪\t\r\n\x7f")
+        code_match = re.match(r"(\d{7})\s*[–—-]\s*(.*)", block)
+        if not code_match:
+            continue
+        remainder = code_match.group(2).strip()
+        if len(remainder) < 3:
+            continue
+        # Só separa título/descrição quando há separador claro; mantém o texto integral em description.
+        title_match = re.match(r"(.{3,140}?)(?:\s+[–—]\s+|\s+-\s+)(.+)$", remainder)
+        job_title = title_match.group(1).strip(" -–—") if title_match else remainder[:140].strip()
+        description = remainder
+        salary_match = re.search(r"R\$\s*[\d.]+,\d{2}(?:\s*(?:A\s*HORA|/HORA))?", description, re.I)
+        records.append({
+            "source_id": code, "title": job_title,
+            "company": "Confidencial (vaga intermediada pelo FGTAS/SINE)",
+            "location": "Caxias do Sul, RS", "mode": "Presencial",
+            "employment_type": "Não informado", "salary": salary_match.group(0) if salary_match else None,
+            "description": description, "source": "FGTAS/SINE Caxias do Sul",
+            "source_document": title, "publication_date": publication_date,
+            "application_url": None,
+            "application_instructions": "Anote o código da vaga e confirme a disponibilidade diretamente na agência FGTAS/SINE. O painel orienta atendimento na Rua Bento Gonçalves, 1901, Caxias do Sul.",
+            "data_kind": "individual_job_record",
+            "availability_status": "needs_confirmation",
+            "availability_note": "Registro extraído de documento público; disponibilidade atual não foi confirmada.",
+            "is_current_opportunity": False,
+            "source_url": url,
+        })
+    return records
+
+
 def parse_caxias_pdf(pdf_bytes, title, url):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     pages = [(page.extract_text() or "") for page in reader.pages]
@@ -162,34 +202,13 @@ def parse_caxias_pdf(pdf_bytes, title, url):
             publication_date = None
     total_match = re.search(r"oferece\s+(\d{1,4})\s+vagas?", compact, re.I)
     declared_total = int(total_match.group(1)) if total_match else None
-    # Cada registro começa com código de sete dígitos; a próxima ocorrência inicia o seguinte.
-    starts = list(re.finditer(r"(?m)^[^\w\r\n]*(\d{7})\s*[–—-]\s*", full_text))
-    records = []
-    for index, match in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(full_text)
-        block = re.sub(r"\s+", " ", full_text[match.start():end]).strip(" •▪\t\r\n\x7f")
-        code_match = re.match(r"(\d{7})\s*[–—-]\s*(.*)", block)
-        if not code_match:
-            continue
-        code, remainder = code_match.groups()
-        title_match = re.match(r"(.{2,140}?)(?:\s*[-–—]\s*)(.+)$", remainder)
-        job_title = title_match.group(1).strip(" -–—") if title_match else remainder[:140].strip()
-        description = title_match.group(2).strip() if title_match else remainder
-        salary_match = re.search(r"R\$\s*[\d.]+,\d{2}(?:\s*(?:A\s*HORA|/HORA))?", description, re.I)
-        records.append({
-            "source_id": code, "title": job_title,
-            "company": "Confidencial (vaga intermediada pelo FGTAS/SINE)",
-            "location": "Caxias do Sul, RS", "mode": "Presencial",
-            "employment_type": "Não informado", "salary": salary_match.group(0) if salary_match else None,
-            "description": description, "source": "FGTAS/SINE Caxias do Sul",
-            "source_document": title, "publication_date": publication_date,
-            "application_url": None, "application_instructions":
-                "Anote o código da vaga e confirme a disponibilidade diretamente na agência FGTAS/SINE. O painel orienta atendimento na Rua Bento Gonçalves, 1901, Caxias do Sul.",
-            "data_kind": "individual_job_record",
-            "availability_status": "needs_confirmation",
-            "is_current_opportunity": False,
-            "source_url": url,
-        })
+    records = parse_job_records_from_text(full_text, title, url, publication_date)
+    if not full_text.strip():
+        extraction_status = "no_text_extracted"
+    elif records:
+        extraction_status = "individual_records_extracted_needing_confirmation"
+    else:
+        extraction_status = "text_extracted_no_individual_records"
     return {
         "title": title[:180], "url": url, "content_type": "application/pdf",
         "download_status": "ok", "pages": len(reader.pages),
@@ -197,7 +216,8 @@ def parse_caxias_pdf(pdf_bytes, title, url):
         "publication_date": publication_date,
         "declared_vacancy_total": declared_total,
         "parsed_individual_records": len(records),
-        "extraction_status": "text_extracted" if full_text.strip() else "no_text_extracted",
+        "extraction_status": extraction_status,
+        "aggregate_total_is_not_record_count": True,
     }, records
 
 def extract_pdf_links(soup, page_url):
@@ -206,9 +226,10 @@ def extract_pdf_links(soup, page_url):
         href = urljoin(page_url, anchor["href"].strip())
         parsed = urlparse(href)
         label = clean(anchor.get_text(" ", strip=True)) or "Documento PDF"
+        is_pdf = parsed.path.lower().endswith(".pdf") or "application/pdf" in str(anchor.get("type", "")).lower()
         if label.casefold() in {"abrir no navegador", "download"}:
             label = "Painel de vagas FGTAS/SINE Caxias do Sul"
-        if parsed.scheme == "https" and parsed.path.lower().endswith(".pdf") and host_allowed(href, page_url):
+        if parsed.scheme == "https" and is_pdf and host_allowed(href, page_url):
             found[href] = label
     for frame in soup.find_all(["iframe", "embed", "object"]):
         href = frame.get("src") or frame.get("data")
@@ -216,10 +237,11 @@ def extract_pdf_links(soup, page_url):
             continue
         absolute = urljoin(page_url, href)
         parsed = urlparse(absolute)
-        if parsed.scheme == "https" and parsed.path.lower().endswith(".pdf") and host_allowed(absolute, page_url):
+        mime = str(frame.get("type", "")).lower()
+        is_pdf = parsed.path.lower().endswith(".pdf") or "application/pdf" in mime
+        if parsed.scheme == "https" and is_pdf and host_allowed(absolute, page_url):
             found.setdefault(absolute, "Documento PDF incorporado")
     return list(found.items())[:MAX_PDFS_PER_PAGE]
-
 
 def inspect_target(client, target):
     urls = [target["url"], *target.get("fallback_urls", [])]
@@ -335,7 +357,7 @@ def collect_all(pause=1.0):
                 time.sleep(max(0.0, pause))
 
     return {
-        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.3",
+        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.4",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo",
         "database_written": False,
@@ -351,13 +373,15 @@ def collect_all(pause=1.0):
             "confirmed_job_boards": sum(bool(x["is_confirmed_job_board"]) for x in results),
             "individual_job_records": sum(len(x["individual_job_records"]) for x in results),
             "pdf_documents_found": sum(len(x["documents"]) for x in results),
-            "pdf_documents_extracted": sum(1 for x in results for d in x["documents"] if d.get("extraction_status") == "text_extracted"),
+            "pdf_documents_extracted": sum(1 for x in results for d in x["documents"] if d.get("extraction_status") in {"text_extracted_no_individual_records", "individual_records_extracted_needing_confirmation"}),
+            "pdf_documents_with_individual_records": sum(1 for x in results for d in x["documents"] if d.get("parsed_individual_records", 0) > 0),
+            "individual_records_needing_confirmation": sum(len(x["individual_job_records"]) for x in results),
         },
         "municipalities": results,
         "rule": (
             "Portais, serviços e plataformas são classificados separadamente. "
             "Links com indicação de teste/homologação são excluídos; demais links seguem "
-            "como candidatos para revisão manual. PDFs oficiais podem ser extraídos; cada registro continua marcado para confirmação, sem presumir disponibilidade atual."
+            "como candidatos para revisão manual. PDFs oficiais de Caxias podem ser extraídos; códigos individuais são deduplicados e permanecem marcados para confirmação. Totais agregados nunca são convertidos em registros."
         ),
     }
 
