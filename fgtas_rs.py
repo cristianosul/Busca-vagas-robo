@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Coletor público experimental de informações FGTAS/SINE do RS.
-
-Não acessa o Emprega Brasil autenticado, não usa gov.br e não grava em banco.
-Separa números agregados de oportunidades de entrevista publicadas.
-Valida datas, dias da semana e nomes dos municípios.
-"""
+"""Coletor público experimental FGTAS/SINE-RS. Não acessa área autenticada nem banco."""
 
 import argparse
 import json
@@ -23,846 +18,311 @@ BASE = "https://www.fgtas.rs.gov.br"
 EMPREGOS_URL = f"{BASE}/empregos-no-rs"
 NOTICIAS_URL = f"{BASE}/noticias"
 ALLOWED_HOSTS = {"www.fgtas.rs.gov.br", "fgtas.rs.gov.br"}
-USER_AGENT = "BuscaVagasBot/0.1 (+respectful public job listing collection)"
+TZ_POA = ZoneInfo("America/Sao_Paulo")
+USER_AGENT = "BuscaVagasBot/0.2 (+public job listing research)"
 MAX_ARTICLES = 15
 MAX_HTML_BYTES = 5 * 1024 * 1024
-TZ_POA = ZoneInfo("America/Sao_Paulo")
-
-JOB_WORDS = re.compile(
-    r"\b(vagas?|empregos?|oportunidades de emprego)\b", re.I
-)
-
-DATE_RE = re.compile(
-    r"(?:Publica[cç][aã]o:\s*)?(\d{1,2})/(\d{1,2})/(\d{4})"
-    r"|(?:Publica[cç][aã]o:\s*)?(\d{1,2})\s+de\s+"
-    r"(janeiro|fevereiro|março|abril|maio|junho|julho|agosto|"
-    r"setembro|outubro|novembro|dezembro)\s+de\s+(\d{4})",
-    re.I,
-)
-
-COUNT_RE = re.compile(
-    r"(?<!\d)(\d{1,3}(?:[.,]\d{3})*|\d+)\s+vagas?\b", re.I
-)
-
-AGENCY_RE = re.compile(
-    r"Ag[eê]ncia\s+FGTAS\s*/?\s*Sine\s+(.+)$", re.I
-)
-
-BULLET_RE = re.compile(
-    r"^[.\-•]\s*(.+?)\s*[–—-]\s*(\d{1,4})\s+vagas?\s*[–—-]\s*(.+)$",
-    re.I,
-)
 
 MONTHS = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "abril": 4,
     "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
     "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }
-
-WEEKDAYS = {
-    "segunda": 0, "terça": 1, "terca": 1,
-    "quarta": 2, "quinta": 3, "sexta": 4,
-    "sábado": 5, "sabado": 5, "domingo": 6,
-}
-
-MUNICIPALITY_ALIASES = {
-    "cachoeira do s": "Cachoeira do Sul",
-    "carlos barbos": "Carlos Barbosa",
-    "taquara": "Taquara",
-}
+DATE_RE = re.compile(
+    r"(\d{1,2})/(\d{1,2})/(\d{4})|"
+    r"(\d{1,2})\s+de\s+(janeiro|fevereiro|março|abril|maio|junho|"
+    r"julho|agosto|setembro|outubro|novembro|dezembro)\s+de\s+(\d{4})",
+    re.I,
+)
+COUNT_RE = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d{3})*|\d+)\s+vagas?\b", re.I)
+AGENCY_RE = re.compile(r"Ag[eê]ncia\s+FGTAS\s*/?\s*Sine\s+(.+)$", re.I)
+BULLET_RE = re.compile(r"^[.\-•]\s*(.+?)\s*[–—-]\s*(\d{1,4})\s+vagas?\s*[–—-]\s*(.+)$", re.I)
+WEEKDAYS = {"segunda": 0, "terça": 1, "terca": 1, "quarta": 2, "quinta": 3,
+            "sexta": 4, "sábado": 5, "sabado": 5, "domingo": 6}
 
 
 class CollectionError(RuntimeError):
     pass
 
 
-def get_poa_today(reference_date: date | None = None) -> date:
-    if reference_date is not None:
-        return reference_date
-    return datetime.now(TZ_POA).date()
+def clean(value):
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
-def clean(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+def today_poa(reference_date=None):
+    return reference_date or datetime.now(TZ_POA).date()
 
 
-def as_int(value: str) -> int:
-    return int(value.replace(".", "").replace(",", ""))
-
-
-def normalize_municipality(value: str) -> str:
-    name = clean(value).strip(" ()-:;,")
-    name = re.sub(r"\s*\([^)]*$", "", name).strip()
-    name = re.sub(r"\s+", " ", name)
-
-    key = re.sub(r"[^a-zà-ÿ ]", "", name.lower()).strip()
-    return MUNICIPALITY_ALIASES.get(key, name)
-
-
-def safe_get(client: httpx.Client, url: str) -> str:
-    parsed = urlparse(url)
-
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
-        raise CollectionError(f"URL fora da lista permitida: {url}")
-
-    last_error = None
-
-    for attempt in range(1, 4):
-        try:
-            response = client.get(url)
-
-            final_url = urlparse(str(response.url))
-            if (
-                final_url.scheme != "https"
-                or final_url.hostname not in ALLOWED_HOSTS
-            ):
-                raise CollectionError(
-                    f"Redirecionamento para URL não permitida: {response.url}"
-                )
-
-            response.raise_for_status()
-
-            if len(response.content) > MAX_HTML_BYTES:
-                raise CollectionError(
-                    f"Página excedeu {MAX_HTML_BYTES} bytes: {url}"
-                )
-
-            return response.text
-
-        except httpx.HTTPStatusError as exc:
-            last_error = exc
-            if exc.response.status_code not in {
-                408, 425, 429, 500, 502, 503, 504
-            }:
-                raise
-
-        except httpx.TransportError as exc:
-            last_error = exc
-
-        if attempt < 3:
-            wait_seconds = attempt * 3
-            print(
-                f"AVISO: tentativa {attempt}/3 falhou para {url}. "
-                f"Nova tentativa em {wait_seconds}s.",
-                file=sys.stderr,
-            )
-            time.sleep(wait_seconds)
-
-    raise CollectionError(
-        f"Falha após 3 tentativas para {url}: "
-        f"{type(last_error).__name__}: {last_error}"
-    )
-
-
-def get_article_links(html: str, source_url: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    found = {}
-
-    for anchor in soup.find_all("a", href=True):
-        title = clean(anchor.get_text(" ", strip=True))
-        url = urljoin(source_url, anchor["href"])
-        parsed = urlparse(url)
-
-        if (
-            title
-            and JOB_WORDS.search(title)
-            and parsed.scheme == "https"
-            and parsed.hostname in ALLOWED_HOSTS
-            and parsed.path not in {"/empregos-no-rs", "/noticias"}
-        ):
-            found[url] = {"title": title, "url": url}
-
-    return list(found.values())
-
-
-def extract_date(text: str) -> str | None:
-    match = DATE_RE.search(text)
-
+def extract_date(text):
+    match = DATE_RE.search(text or "")
     if not match:
         return None
-
     try:
         if match.group(1):
-            day, month, year = map(int, match.groups()[:3])
-        else:
-            day = int(match.group(4))
-            month = MONTHS[match.group(5).lower()]
-            year = int(match.group(6))
-
-        return date(year, month, day).isoformat()
-
+            return date(int(match.group(3)), int(match.group(2)), int(match.group(1))).isoformat()
+        return date(int(match.group(6)), MONTHS[match.group(5).lower()], int(match.group(4))).isoformat()
     except (ValueError, TypeError):
         return None
 
 
-def extract_publication_date(html: str) -> str | None:
-    """Prioriza a data explicitamente identificada como Publicação."""
+def extract_publication_date(html):
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
-
-    publication_label = re.search(
-        r"\bPublicação\s*:",
-        text,
-        re.I,
-    )
-
-    if publication_label:
-        publication_text = text[publication_label.start():]
-        return extract_date(publication_text)
-
-    # Mantém uma alternativa para páginas que não exibem o rótulo.
-    return extract_date(text)
+    match = re.search(r"\bPublica[cç][aã]o\s*:", text, re.I)
+    return extract_date(text[match.start():match.start() + 120]) if match else extract_date(text[:500])
 
 
-def extract_aggregate(
-    text: str,
-    title: str,
-    url: str,
-    publication_date: str | None = None,
-) -> dict | None:
-    lines = [clean(line) for line in text.splitlines() if clean(line)]
-    statewide_total = None
-
-    for index, line in enumerate(lines):
-        context = " ".join(lines[max(0, index - 1): index + 2])
-
-        if re.search(r"\b(RS|Estado|Rio Grande do Sul)\b", context, re.I):
-            match = COUNT_RE.search(line)
-            if match:
-                statewide_total = as_int(match.group(1))
-                break
-
-    agency_counts = []
-    agency_section = False
-
-    for line in lines:
-        if re.search(
-            r"Ag[eê]ncias?.{0,80}"
-            r"(?:maiores|maior quantidade|maiores n[uú]meros)",
-            line,
-            re.I,
-        ):
-            agency_section = True
-
-        if agency_section:
-            for name, count in re.findall(
-                r"([A-ZÀ-Ý][A-Za-zÀ-ÿ'’ .-]{1,45}?)"
-                r"\s*\((\d{1,3}(?:\.\d{3})*)\)",
-                line,
-            ):
-                if name.lower() not in {
-                    "rio grande do sul", "porto alegre"
-                }:
-                    agency_counts.append({
-                        "agency_or_city": normalize_municipality(name),
-                        "announced_openings": as_int(count),
-                    })
-
-            if agency_counts and re.search(r"ocupa[cç][oõ]es", line, re.I):
-                agency_section = False
-
-    if statewide_total is None and not agency_counts:
-        return None
-
-    return {
-        "report_title": title,
-        "publication_date": (
-            publication_date
-            if publication_date is not None
-            else extract_date(text)
-        ),
-        "state": "RS",
-        "statewide_announced_openings": statewide_total,
-        "agency_counts": agency_counts,
-        "source_url": url,
-        "data_kind": "aggregate_only",
-        "note": (
-            "Números agregados; não representam registros individuais "
-            "de vagas e não devem ser somados a outros relatórios."
-        ),
-    }
+def normalize_municipality(value):
+    value = clean(value).strip(" ()-:;,")
+    value = re.sub(r"\s*\([^)]*$", "", value).strip()
+    return value
 
 
-def validate_interview_schedule(
-    schedule: str,
-    publication_date: str | None,
-    reference_date: date | None = None,
-) -> dict:
-    today_poa = get_poa_today(reference_date)
+def safe_get(client, url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+        raise CollectionError(f"URL fora da lista permitida: {url}")
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            response = client.get(url)
+            final = urlparse(str(response.url))
+            if final.scheme != "https" or final.hostname not in ALLOWED_HOSTS:
+                raise CollectionError(f"Redirecionamento para host não permitido: {response.url}")
+            response.raise_for_status()
+            if len(response.content) > MAX_HTML_BYTES:
+                raise CollectionError(f"Página excedeu {MAX_HTML_BYTES} bytes")
+            return response.text
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response.status_code not in {408, 425, 429, 500, 502, 503, 504}:
+                raise
+        except httpx.TransportError as exc:
+            last_error = exc
+        if attempt < 3:
+            time.sleep(attempt * 2)
+    raise CollectionError(f"Falha após 3 tentativas: {type(last_error).__name__}: {last_error}")
 
+
+def get_article_links(html, source_url):
+    soup = BeautifulSoup(html, "html.parser")
+    found = {}
+    for anchor in soup.find_all("a", href=True):
+        title = clean(anchor.get_text(" ", strip=True))
+        url = urljoin(source_url, anchor["href"])
+        parsed = urlparse(url)
+        if (title and re.search(r"\b(vagas?|empregos?|oportunidades de emprego)\b", title, re.I)
+                and parsed.scheme == "https" and parsed.hostname in ALLOWED_HOSTS
+                and parsed.path not in {"/empregos-no-rs", "/noticias"}):
+            found[url] = {"title": title, "url": url}
+    return list(found.values())
+
+
+def validate_interview_schedule(schedule, publication_date, reference_date=None):
+    today = today_poa(reference_date)
     result = {
-        "reference_date_poa": today_poa.isoformat(),
-        "event_dates": [],
+        "reference_date_poa": today.isoformat(), "event_dates": [],
         "schedule_validation": "date_not_determined",
-        "availability_status": "needs_confirmation",
-        "is_today": False,
-        "schedule_warning": None,
+        "availability_status": "needs_confirmation", "is_today": False,
+        "schedule_warning": "Data da entrevista não validada.",
     }
-
     if not publication_date:
-        result["schedule_warning"] = (
-            "Data da publicação não identificada; entrevista não validada."
-        )
+        result["schedule_warning"] = "Data da publicação ausente; não validar entrevista."
         return result
-
     try:
         published = date.fromisoformat(publication_date)
     except ValueError:
-        result["schedule_warning"] = (
-            "Data de publicação inválida; entrevista não validada."
-        )
+        result["schedule_warning"] = "Data da publicação inválida."
         return result
 
     weekdays = []
-
-    weekday_pattern = (
-        r"\b(segunda|terça|terca|quarta|quinta|sexta|"
-        r"sábado|sabado|domingo)(?:-feira)?\b"
-    )
-
-    for word in re.findall(weekday_pattern, schedule.lower()):
-        if word in WEEKDAYS and WEEKDAYS[word] not in weekdays:
+    for word in re.findall(r"\b(segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)(?:-feira)?\b",
+                           schedule.lower()):
+        if WEEKDAYS[word] not in weekdays:
             weekdays.append(WEEKDAYS[word])
 
-    day_group = re.search(
-        r"\((\d{1,2}(?:\s*(?:e|,|/)\s*\d{1,2})*)\)",
-        schedule,
-    )
-
-    if not day_group:
-        result["schedule_warning"] = (
-            "O anúncio não informa dia do mês de forma estruturada."
-        )
+    group = re.search(r"\((\d{1,2}(?:\s*(?:e|,|/)\s*\d{1,2})*)\)", schedule)
+    if not group:
+        result["schedule_warning"] = "Dia do mês não identificado de forma estruturada."
         return result
-
-    days = [
-        int(value)
-        for value in re.findall(r"\d{1,2}", day_group.group(1))
-    ]
-
+    days = [int(x) for x in re.findall(r"\d{1,2}", group.group(1))]
     checks = []
-
-    for index, day in enumerate(days):
+    for i, day in enumerate(days):
         try:
-            event_date = published.replace(day=day)
+            event = published.replace(day=day)
         except ValueError:
-            checks.append({
-                "date": None,
-                "weekday_matches": None,
-                "status": "invalid_calendar_date",
-            })
+            checks.append({"date": None, "weekday_matches": None, "status": "invalid_calendar_date"})
             continue
-
-        expected_weekday = (
-            weekdays[index]
-            if index < len(weekdays)
-            else weekdays[0] if len(weekdays) == 1 else None
-        )
-
-        matches = (
-            event_date.weekday() == expected_weekday
-            if expected_weekday is not None
-            else None
-        )
-
-        if matches is False:
-            status = "weekday_mismatch"
-        elif event_date < today_poa:
-            status = "past"
-        elif event_date == today_poa:
-            status = "today"
-        else:
-            status = "future_unverified"
-
-        checks.append({
-            "date": event_date.isoformat(),
-            "weekday_matches": matches,
-            "status": status,
-        })
-
+        expected = weekdays[i] if i < len(weekdays) else (weekdays[0] if len(weekdays) == 1 else None)
+        matches = event.weekday() == expected if expected is not None else None
+        status = "weekday_mismatch" if matches is False else (
+            "past" if event < today else "today" if event == today else "future_unverified")
+        checks.append({"date": event.isoformat(), "weekday_matches": matches, "status": status})
+    statuses = [x["status"] for x in checks]
     result["event_dates"] = checks
-    statuses = [item["status"] for item in checks]
-
-    if any(
-        item in {"weekday_mismatch", "invalid_calendar_date"}
-        for item in statuses
-    ):
-        result.update({
-            "schedule_validation": "weekday_or_calendar_mismatch",
-            "availability_status": "not_validated",
-            "is_today": False,
-            "schedule_warning": (
-                "Dia da semana não corresponde à data informada "
-                "ou a data é inválida. Conferir a publicação original."
-            ),
-        })
-
-    elif statuses and all(item == "past" for item in statuses):
-        result.update({
-            "schedule_validation": "past_date",
-            "availability_status": "expired",
-            "is_today": False,
-            "schedule_warning": (
-                f"Data da entrevista já passou em relação à data atual "
-                f"em Porto Alegre ({today_poa.isoformat()}). "
-                "Não tratar como oportunidade atual."
-            ),
-        })
-
-    elif any(item == "today" for item in statuses) and all(
-        item in {"today", "future_unverified"} for item in statuses
-    ):
-        result.update({
-            "schedule_validation": "date_consistent",
-            "availability_status": "today_unverified",
-            "is_today": True,
-            "schedule_warning": (
-                f"Entrevista marcada para hoje em Porto Alegre "
-                f"({today_poa.isoformat()}), compatível com o dia da semana; "
-                "confirmar horário e disponibilidade com a FGTAS/SINE."
-            ),
-        })
-
-    elif statuses and all(
-        item == "future_unverified" for item in statuses
-    ):
-        result.update({
-            "schedule_validation": "date_consistent",
-            "availability_status": "future_unverified",
-            "is_today": False,
-            "schedule_warning": (
-                f"Data futura em relação a Porto Alegre ({today_poa.isoformat()}) "
-                "compatível com o dia da semana, mas a disponibilidade deve ser "
-                "confirmada com a FGTAS/SINE."
-            ),
-        })
-
+    if any(x in {"weekday_mismatch", "invalid_calendar_date"} for x in statuses):
+        result.update(schedule_validation="weekday_or_calendar_mismatch",
+                      availability_status="not_validated",
+                      schedule_warning="Dia da semana divergente ou data inválida; conferir publicação.")
+    elif statuses and all(x == "past" for x in statuses):
+        result.update(schedule_validation="past_date", availability_status="expired",
+                      schedule_warning=f"Entrevista passada em relação a {today.isoformat()} (Porto Alegre).")
+    elif statuses and all(x in {"today", "future_unverified"} for x in statuses):
+        is_today = "today" in statuses
+        result.update(schedule_validation="date_consistent",
+                      availability_status="today_unverified" if is_today else "future_unverified",
+                      is_today=is_today,
+                      schedule_warning="Data compatível com calendário, mas confirmar com a agência.")
     else:
-        result.update({
-            "schedule_validation": "date_requires_review",
-            "availability_status": "not_validated",
-            "is_today": False,
-            "schedule_warning": "A data exige conferência manual.",
-        })
-
+        result.update(schedule_validation="date_requires_review", availability_status="not_validated",
+                      schedule_warning="Data exige conferência manual.")
     return result
 
 
-def extract_interviews(
-    text: str,
-    title: str,
-    url: str,
-    publication_date: str | None = None,
-    reference_date: date | None = None,
-) -> list[dict]:
-    lines = [clean(line) for line in text.splitlines()]
-    current_agency = None
-    results = []
-
-    if publication_date is None:
-        publication_date = extract_date(text)
-
-    for line in lines:
+def extract_interviews(text, title, url, publication_date=None, reference_date=None):
+    publication_date = publication_date or extract_date(text)
+    current_agency, results = None, []
+    for line in [clean(x) for x in text.splitlines()]:
         if not line:
             continue
-
-        agency_match = AGENCY_RE.match(line)
-
-        if agency_match:
-            current_agency = clean(
-                agency_match.group(1)
-            ).strip(" -:")
+        agency = AGENCY_RE.match(line)
+        if agency:
+            current_agency = clean(agency.group(1)).strip(" -:")
             continue
-
         bullet = BULLET_RE.match(line)
-
         if bullet and current_agency:
-            when, quantity, roles = bullet.groups()
-
-            municipality = normalize_municipality(
-                current_agency.split(" Zona ")[0]
-            )
-
-            validation = validate_interview_schedule(
-                clean(when),
-                publication_date,
-                reference_date=reference_date,
-            )
-
-            is_current = validation["availability_status"] in {
-                "today_unverified",
-                "future_unverified",
-            }
-
+            schedule, quantity, roles = bullet.groups()
+            validation = validate_interview_schedule(schedule, publication_date, reference_date)
+            is_current = validation["availability_status"] in {"today_unverified", "future_unverified"}
             results.append({
                 "agency": current_agency,
-                "municipality": municipality,
-                "state": "RS",
-                "schedule_or_date": clean(when),
-                **validation,
-                "announced_openings": int(quantity),
-                "positions_description": clean(roles),
-                "report_title": title,
-                "publication_date": publication_date,
-                "source_url": url,
-                "data_kind": "published_interview_opportunity",
+                "municipality": normalize_municipality(current_agency.split(" Zona ")[0]),
+                "state": "RS", "schedule_or_date": clean(schedule), **validation,
+                "announced_openings": int(quantity), "positions_description": clean(roles),
+                "report_title": title, "publication_date": publication_date,
+                "source_url": url, "data_kind": "published_interview_opportunity",
                 "is_current_opportunity": is_current,
-                "application_note": (
-                    "Registro de entrevista divulgado pela FGTAS/SINE. "
-                    "Mesmo com data compatível, confirmar data, "
-                    "horário e disponibilidade diretamente com a agência."
-                ),
+                "application_note": "Confirmar data, horário e disponibilidade diretamente com a agência.",
             })
-
     return results
 
 
-def parse_article(
-    html: str,
-    title: str,
-    url: str,
-    reference_date: date | None = None,
-) -> tuple[dict | None, list[dict]]:
-    soup = BeautifulSoup(html, "html.parser")
-
-    for node in soup([
-        "script", "style", "nav", "footer", "header", "form"
-    ]):
-        node.decompose()
-
-    text = soup.get_text("\n", strip=True)
-
-    # A mesma data oficial será usada nos agregados e entrevistas.
-    publication_date = extract_publication_date(html)
-
-    return (
-        extract_aggregate(
-            text,
-            title,
-            url,
-            publication_date,
-        ),
-        extract_interviews(
-            text,
-            title,
-            url,
-            publication_date,
-            reference_date=reference_date,
-        ),
-    )
-
-
-def collect() -> dict:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml",
+def extract_aggregate(text, title, url, publication_date=None):
+    lines = [clean(x) for x in text.splitlines() if clean(x)]
+    total = None
+    for i, line in enumerate(lines):
+        context = " ".join(lines[max(0, i-1):i+2])
+        if re.search(r"\b(RS|Estado|Rio Grande do Sul)\b", context, re.I):
+            match = COUNT_RE.search(line)
+            if match:
+                total = int(match.group(1).replace(".", ""))
+                break
+    if total is None:
+        return None
+    return {
+        "report_title": title, "publication_date": publication_date or extract_date(text),
+        "state": "RS", "statewide_announced_openings": total, "agency_counts": [],
+        "source_url": url, "data_kind": "aggregate_only",
+        "note": "Número agregado; não representa vagas individuais e não deve ser somado a outro relatório.",
     }
 
-    timeout = httpx.Timeout(45.0, connect=20.0)
-    checked_articles = []
 
-    with httpx.Client(
-        headers=headers,
-        timeout=timeout,
-        follow_redirects=True,
-    ) as client:
+def parse_article(html, title, url, reference_date=None):
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup(["script", "style", "nav", "footer", "header", "form"]):
+        node.decompose()
+    text = soup.get_text("\n", strip=True)
+    pub_date = extract_publication_date(html)
+    return (extract_aggregate(text, title, url, pub_date),
+            extract_interviews(text, title, url, pub_date, reference_date))
 
-        main_html = safe_get(client, EMPREGOS_URL)
-        news_html = safe_get(client, NOTICIAS_URL)
 
-        article_map = {}
-
-        for source_html, source_url in (
-            (main_html, EMPREGOS_URL),
-            (news_html, NOTICIAS_URL),
-        ):
-            for item in get_article_links(source_html, source_url):
-                article_map[item["url"]] = item
-
-        main_aggregate, main_interviews = parse_article(
-            main_html,
-            "Empregos no RS (página principal)",
-            EMPREGOS_URL,
-        )
-
-        aggregate_reports = (
-            [main_aggregate] if main_aggregate else []
-        )
-        interview_opportunities = list(main_interviews)
-
-        checked_articles.extend([
-            {
-                "title": "Empregos no RS (página principal)",
-                "url": EMPREGOS_URL,
-                "publication_date": extract_publication_date(main_html),
-                "individual_interview_records": len(main_interviews),
-                "aggregate_data_found": bool(main_aggregate),
-                "status": "ok",
-                "page_kind": "main_public_page",
-            },
-            {
-                "title": "Notícias FGTAS/SINE",
-                "url": NOTICIAS_URL,
-                "publication_date": extract_publication_date(news_html),
-                "individual_interview_records": 0,
-                "aggregate_data_found": False,
-                "status": "ok",
-                "page_kind": "news_index",
-            },
-        ])
-
-        for item in list(article_map.values())[:MAX_ARTICLES]:
+def collect():
+    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    timeout = httpx.Timeout(35.0, connect=15.0)
+    aggregates, interviews, checked, errors = [], [], [], []
+    with httpx.Client(headers=headers, timeout=timeout, follow_redirects=True) as client:
+        for index_url, index_title in [(EMPREGOS_URL, "Empregos no RS"), (NOTICIAS_URL, "Notícias FGTAS/SINE")]:
             try:
-                html = safe_get(client, item["url"])
-
-                aggregate, interviews = parse_article(
-                    html,
-                    item["title"],
-                    item["url"],
-                )
-
-                if aggregate:
-                    aggregate_reports.append(aggregate)
-
-                interview_opportunities.extend(interviews)
-
-                checked_articles.append({
-                    "title": item["title"],
-                    "url": item["url"],
-                    "publication_date": extract_publication_date(html),
-                    "individual_interview_records": len(interviews),
-                    "aggregate_data_found": bool(aggregate),
-                    "status": "ok",
-                    "page_kind": "article",
-                })
-
-            except (
-                httpx.HTTPError,
-                CollectionError,
-                ValueError,
-            ) as exc:
-                print(
-                    f"AVISO: notícia ignorada após falha: "
-                    f"{item['url']} - {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-
-                checked_articles.append({
-                    "title": item["title"],
-                    "url": item["url"],
-                    "publication_date": None,
-                    "individual_interview_records": 0,
-                    "aggregate_data_found": False,
-                    "status": "error",
-                    "page_kind": "article",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
+                html = safe_get(client, index_url)
+                checked.append({"title": index_title, "url": index_url, "status": "ok"})
+                if index_url == EMPREGOS_URL:
+                    agg, records = parse_article(html, index_title, index_url)
+                    if agg: aggregates.append(agg)
+                    interviews.extend(records)
+                for item in get_article_links(html, index_url):
+                    if len({x["url"] for x in checked}) >= MAX_ARTICLES + 2:
+                        break
+                    try:
+                        article = safe_get(client, item["url"])
+                        agg, records = parse_article(article, item["title"], item["url"])
+                        if agg: aggregates.append(agg)
+                        interviews.extend(records)
+                        checked.append({"title": item["title"], "url": item["url"], "status": "ok"})
+                    except Exception as exc:
+                        errors.append({"url": item["url"], "error": f"{type(exc).__name__}: {exc}"})
+                        checked.append({"title": item["title"], "url": item["url"], "status": "error"})
+            except Exception as exc:
+                errors.append({"url": index_url, "error": f"{type(exc).__name__}: {exc}"})
+                checked.append({"title": index_title, "url": index_url, "status": "error"})
 
     unique = {}
-
-    for item in interview_opportunities:
-        key = (
-            item["agency"],
-            item["schedule_or_date"],
-            item["announced_openings"],
-            item["positions_description"],
-            item["source_url"],
-        )
+    for item in interviews:
+        key = (item["agency"], item["schedule_or_date"], item["announced_openings"],
+               item["positions_description"], item["source_url"])
         unique[key] = item
-
-    unique_aggregates = {}
-
-    for report in aggregate_reports:
-        if report:
-            key = (
-                report["source_url"],
-                report["report_title"],
-            )
-            unique_aggregates[key] = report
-
+    aggregates_unique = {x["source_url"]: x for x in aggregates}
     records = list(unique.values())
-
-    municipalities = sorted({
-        item["municipality"]
-        for item in records
-        if item["municipality"]
-    })
-
-    today = get_poa_today().isoformat()
-
     return {
-        "collector": "FGTAS/SINE RS - protótipo público",
-        "generated_at_local_date": today,
-        "state": "Rio Grande do Sul",
-        "municipality_universe": 497,
-        "municipalities_with_individual_records": municipalities,
-        "individual_municipality_count": len(municipalities),
-        "aggregate_reports": list(unique_aggregates.values()),
-        "published_interview_opportunities": records,
-        "today_unverified_interview_opportunities": [
-            item for item in records
-            if item["is_today"]
+        "source": "FGTAS/SINE RS", "generated_at_poa": datetime.now(TZ_POA).isoformat(),
+        "timezone": "America/Sao_Paulo", "database_written": False,
+        "summary": {
+            "checked_pages": len(checked), "aggregate_reports": len(aggregates_unique),
+            "interview_records": len(records),
+            "current_unverified_interviews": sum(x["is_current_opportunity"] for x in records),
+            "expired_interviews": sum(x["availability_status"] == "expired" for x in records),
+            "not_validated_interviews": sum(x["availability_status"] == "not_validated" for x in records),
+        },
+        "aggregate_reports": list(aggregates_unique.values()),
+        "interview_records": records, "checked_pages": checked, "errors": errors,
+        "limitations": [
+            "Não acessa Emprega Brasil autenticado nem dados protegidos por login.",
+            "Entrevistas não equivalem automaticamente a vagas abertas.",
+            "Datas futuras permanecem não verificadas até confirmação com a agência.",
+            "Relatórios agregados não são convertidos em vagas individuais.",
         ],
-        "current_unverified_interview_opportunities": [
-            item for item in records
-            if item["is_current_opportunity"]
-        ],
-        "expired_interview_opportunities": [
-            item for item in records
-            if item["availability_status"] == "expired"
-        ],
-        "not_validated_interview_opportunities": [
-            item for item in records
-            if item["availability_status"] == "not_validated"
-        ],
-        "checked_articles": checked_articles,
-        "coverage_status": (
-            "partial_public_publications_only"
-            if records or unique_aggregates
-            else "no_records_extracted"
-        ),
-        "important_limit": (
-            "Este coletor não acessa o Emprega Brasil autenticado. "
-            "Não representa cobertura integral dos 497 municípios. "
-            "Somente inclui dados públicos divulgados pela FGTAS/SINE."
-        ),
     }
 
 
-def run_self_test() -> None:
-    # 2026-11-26 é quinta-feira (weekday == 3).
-    poa_today = date(2026, 11, 26)
-    pub_date = "2026-11-23"  # segunda-feira
-
-    # 1. Entrevista para HOJE em Porto Alegre (quinta-feira, dia 26)
-    today_res = validate_interview_schedule(
-        "quinta-feira (26)",
-        pub_date,
-        reference_date=poa_today,
-    )
-    assert today_res["availability_status"] == "today_unverified"
-    assert today_res["is_today"] is True
-    assert today_res["event_dates"][0]["status"] == "today"
-    assert today_res["event_dates"][0]["weekday_matches"] is True
-
-    # 2. Entrevista ANTIGA em relação a hoje em POA (quarta-feira, dia 25)
-    past_res = validate_interview_schedule(
-        "quarta-feira (25)",
-        pub_date,
-        reference_date=poa_today,
-    )
-    assert past_res["availability_status"] == "expired"
-    assert past_res["is_today"] is False
-    assert past_res["event_dates"][0]["status"] == "past"
-    assert past_res["event_dates"][0]["weekday_matches"] is True
-
-    # 3. Entrevista FUTURA em relação a hoje em POA (sexta-feira, dia 27)
-    future_res = validate_interview_schedule(
-        "sexta-feira (27)",
-        pub_date,
-        reference_date=poa_today,
-    )
-    assert future_res["availability_status"] == "future_unverified"
-    assert future_res["is_today"] is False
-    assert future_res["event_dates"][0]["status"] == "future_unverified"
-    assert future_res["event_dates"][0]["weekday_matches"] is True
-
-    # 4. Dia da semana divergente (26/11/2026 é quinta, não terça)
-    mismatch_res = validate_interview_schedule(
-        "terça-feira (26)",
-        pub_date,
-        reference_date=poa_today,
-    )
-    assert mismatch_res["availability_status"] == "not_validated"
-    assert mismatch_res["schedule_validation"] == "weekday_or_calendar_mismatch"
-    assert mismatch_res["event_dates"][0]["weekday_matches"] is False
-
-    # 5. Extração completa com entrevistas hoje, vencida e futura
-    sample_text = (
-        "Agência FGTAS/Sine Porto Alegre\n"
-        ". quinta-feira (26) - 10 vagas - Auxiliar Administrativo\n"
-        ". quarta-feira (25) - 5 vagas - Estoquista\n"
-        ". sexta-feira (27) - 8 vagas - Operador de Caixa\n"
-    )
-    items = extract_interviews(
-        sample_text,
-        "Mutirão de entrevistas",
-        f"{BASE}/noticia-teste",
-        publication_date=pub_date,
-        reference_date=poa_today,
-    )
-    assert len(items) == 3
-    by_day = {item["event_dates"][0]["date"]: item for item in items}
-
-    assert by_day["2026-11-26"]["is_today"] is True
-    assert by_day["2026-11-26"]["is_current_opportunity"] is True
-    assert by_day["2026-11-25"]["availability_status"] == "expired"
-    assert by_day["2026-11-25"]["is_current_opportunity"] is False
-    assert by_day["2026-11-27"]["availability_status"] == "future_unverified"
-    assert by_day["2026-11-27"]["is_current_opportunity"] is True
-
-    print("SELF_TEST_OK")
+def self_test():
+    assert extract_date("Publicação: 26/11/2026") == "2026-11-26"
+    assert extract_date("Publicação: 31/02/2026") is None
+    expired = validate_interview_schedule("sexta-feira (17)", "2026-04-17", date(2026, 11, 27))
+    assert expired["availability_status"] == "expired"
+    mismatch = validate_interview_schedule("segunda-feira (17)", "2026-04-17", date(2026, 4, 1))
+    assert mismatch["availability_status"] == "not_validated"
+    assert normalize_municipality("Carlos Barbosa (") == "Carlos Barbosa"
+    assert extract_aggregate("Rio Grande do Sul\n5.401 vagas", "Teste", "https://www.fgtas.rs.gov.br/x")
+    print("Autoteste FGTAS/SINE RS: OK")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Coletor público experimental FGTAS/SINE RS"
-    )
-    parser.add_argument(
-        "--output",
-        default="fgtas_sine_rs.json",
-        help="Caminho do arquivo JSON de saída",
-    )
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="Executa testes internos e encerra",
-    )
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", default="resultado-fgtas-rs/fgtas_sine_rs.json")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
-
     if args.self_test:
-        run_self_test()
-        return 0
-
-    try:
-        payload = collect()
-    except (httpx.HTTPError, CollectionError, ValueError) as exc:
-        print(f"ERRO: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    print(f"JSON gerado: {output_path}")
-    print(f"Relatórios agregados: {len(payload['aggregate_reports'])}")
-    print(
-        "Entrevistas detalhadas: "
-        f"{len(payload['published_interview_opportunities'])}"
-    )
-    print(
-        "Entrevistas hoje (POA): "
-        f"{len(payload['today_unverified_interview_opportunities'])}"
-    )
-    print(
-        "Entrevistas vencidas: "
-        f"{len(payload['expired_interview_opportunities'])}"
-    )
-    print(
-        "Entrevistas não validadas: "
-        f"{len(payload['not_validated_interview_opportunities'])}"
-    )
-    print(
-        "Municípios com registros individuais: "
-        f"{payload['individual_municipality_count']}/"
-        f"{payload['municipality_universe']}"
-    )
-    print("Nenhum banco de dados foi acessado.")
-    return 0
+        self_test()
+        return
+    payload = collect()
+    path = Path(args.output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(payload["summary"], ensure_ascii=False, indent=2))
+    print(f"JSON salvo em: {path}")
+    if payload["errors"]:
+        print(f"Avisos de páginas com erro: {len(payload['errors'])}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
