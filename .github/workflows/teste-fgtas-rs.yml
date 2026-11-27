@@ -74,3 +74,7 @@ jobs:
           path: resultado-fgtas-rs/*.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Mapear páginas internas e PDFs da FGTAS/RS
+        run: python -u scripts/mapear_fgtas_interno.py
+        
