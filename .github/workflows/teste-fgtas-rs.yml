@@ -95,5 +95,11 @@ jobs:
         with:
           name: resultado-prefeituras-rs
           path: prefeituras_rs.txt
-          
+      
+      - name: Coletar oportunidades municipais RS
+        env:
+          URL_CAXIAS_FGTAS_SINE: "https://caxias.rs.gov.br/..."
+          URL_NOVO_HAMBURGO_FGTAS_SINE: "https://www.novohamburgo.rs.gov.br/..."
+        run: python -u scripts/coletar_prefeituras_rs.py --output resultado-fgtas-rs/prefeituras_rs.json
+        
         
