@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Autoteste das regras municipais e do parser PDF V3.3; não acessa a rede."""
+"""Autoteste das regras municipais e do parser PDF V3.4; não acessa a rede."""
 
 from coletar_prefeituras_rs import (
-    TARGETS, PLACEHOLDER_TERMS, host_allowed, clean, parse_caxias_pdf,
+    TARGETS, PLACEHOLDER_TERMS, host_allowed, clean, parse_job_records_from_text,
 )
 
 
@@ -25,8 +25,17 @@ def main():
     assert PLACEHOLDER_TERMS.search("/oportunidades/selecao-teste")
     assert not PLACEHOLDER_TERMS.search("Oportunidades de trabalho")
     assert clean("  Gerência   do Trabalho ") == "Gerência do Trabalho"
-    print("Autoteste municipal V3.3: OK")
-    print("PDF de Caxias, fallback oficial de Bento e filtros de homologação conferidos.")
+    # O parser precisa encontrar códigos mesmo quando a extração do PDF não os deixa no início da linha.
+    sample = "Painel FGTAS\nCódigo 1234567 - Auxiliar de produção - salário R$ 1.800,00\n1234567 - duplicado\n7654321 – Operador de caixa"
+    records = parse_job_records_from_text(sample, "Painel teste", "https://gcpstorage.caxias.rs.gov.br/painel.pdf", "2026-11-25")
+    assert [item["source_id"] for item in records] == ["1234567", "7654321"]
+    assert records[0]["availability_status"] == "needs_confirmation"
+    assert records[0]["is_current_opportunity"] is False
+    assert records[0]["publication_date"] == "2026-11-25"
+    # O total agregado não participa desta função e nunca vira contagem de registros.
+    assert len(records) == 2
+    print("Autoteste municipal V3.4: OK")
+    print("PDF, códigos únicos, confirmação de disponibilidade, fallback de Bento e filtros de homologação conferidos.")
 
 
 if __name__ == "__main__":
