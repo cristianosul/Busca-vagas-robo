@@ -80,5 +80,10 @@ jobs:
 
       - name: Testar acesso e mapear balcões das prefeituras do RS
         run: python -u scripts/testar_prefeituras_rs.py
-        
+
+      - name: Testar acesso e mapear balcões das prefeituras do RS
+        run: |
+          python -u scripts/testar_prefeituras_rs.py > prefeituras_rs.txt 2>&1 || true
+          cat prefeituras_rs.txt
+          
         
