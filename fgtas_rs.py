@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coletor público experimental FGTAS/SINE-RS. Não acessa área autenticada nem banco."""
+"""Coletor público experimental FGTAS/SINE-RS V3.3. Não acessa banco."""
 
 import argparse
 import json
@@ -72,20 +72,19 @@ def extract_publication_date(html):
     return extract_date(text[match.start():match.start() + 120]) if match else extract_date(text[:500])
 
 
-MUNICIPALITY_ALIASES = {
-    # Fragmento observado no texto extraído do relatório FGTAS de 2026.
-    "cachoeira do s": "Cachoeira do Sul",
-}
+# Aliases explícitos: manter o texto bruto para auditoria e normalizar apenas o campo tratado.
+MUNICIPALITY_ALIASES = {"cachoeira do s": "Cachoeira do Sul"}
+AGENCY_ALIASES = {"cachoeira do s": "Cachoeira do Sul"}
 
 def normalize_agency_name(value):
-    """Remove pontuação/parênteses soltos no fim do nome da agência."""
-    value = clean(value)
-    value = re.sub(r"\s*\([^)]*$", "", value).strip()
-    return value.strip(" -:;,()")
+    """Remove pontuação órfã no final e aplica apenas aliases documentados."""
+    raw = clean(value)
+    cleaned = re.sub(r"\s*\([^)]*$", "", raw).strip().strip(" -:;,()")
+    return AGENCY_ALIASES.get(cleaned.casefold(), cleaned)
 
 def normalize_municipality(value):
-    value = normalize_agency_name(value)
-    return MUNICIPALITY_ALIASES.get(value.casefold(), value)
+    cleaned = re.sub(r"\s*\([^)]*$", "", clean(value)).strip().strip(" -:;,()")
+    return MUNICIPALITY_ALIASES.get(cleaned.casefold(), cleaned)
 
 
 def safe_get(client, url):
@@ -129,6 +128,7 @@ def get_article_links(html, source_url):
 
 
 def validate_interview_schedule(schedule, publication_date, reference_date=None):
+    """Valida datas sem presumir mês seguinte ou converter entrevistas em vagas."""
     today = today_poa(reference_date)
     result = {
         "reference_date_poa": today.isoformat(), "event_dates": [],
@@ -141,43 +141,60 @@ def validate_interview_schedule(schedule, publication_date, reference_date=None)
         return result
     try:
         published = date.fromisoformat(publication_date)
-    except ValueError:
+    except (TypeError, ValueError):
         result["schedule_warning"] = "Data da publicação inválida."
         return result
+    if published > today:
+        result.update(schedule_validation="publication_date_in_future",
+                      availability_status="not_validated",
+                      schedule_warning="A data de publicação está no futuro em relação à coleta.")
+        return result
 
-    weekdays = []
-    for word in re.findall(r"\b(segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)(?:-feira)?\b",
-                           schedule.lower()):
-        if WEEKDAYS[word] not in weekdays:
-            weekdays.append(WEEKDAYS[word])
-
-    group = re.search(r"\((\d{1,2}(?:\s*(?:e|,|/)\s*\d{1,2})*)\)", schedule)
+    weekday_words = re.findall(
+        r"\b(segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)(?:-feira)?\b",
+        (schedule or "").lower()
+    )
+    weekdays = [WEEKDAYS[word] for word in weekday_words]
+    group = re.search(r"\((\d{1,2}(?:\s*(?:e|,|/)\s*\d{1,2})*)\)", schedule or "")
     if not group:
         result["schedule_warning"] = "Dia do mês não identificado de forma estruturada."
         return result
     days = [int(x) for x in re.findall(r"\d{1,2}", group.group(1))]
+    if not days or any(day < 1 or day > 31 for day in days):
+        result.update(schedule_validation="invalid_day_number", availability_status="not_validated",
+                      schedule_warning="Número de dia inválido no texto da entrevista.")
+        return result
     checks = []
-    for i, day in enumerate(days):
+    for index, day in enumerate(days):
         try:
             event = published.replace(day=day)
         except ValueError:
             checks.append({"date": None, "weekday_matches": None, "status": "invalid_calendar_date"})
             continue
-        expected = weekdays[i] if i < len(weekdays) else (weekdays[0] if len(weekdays) == 1 else None)
+        expected = weekdays[index] if index < len(weekdays) else (weekdays[0] if len(weekdays) == 1 else None)
         matches = event.weekday() == expected if expected is not None else None
-        status = "weekday_mismatch" if matches is False else (
-            "past" if event < today else "today" if event == today else "future_unverified")
+        # Se o dia já passou no mês da publicação, não presumir que se refere ao mês seguinte.
+        if day < published.day:
+            status = "ambiguous_month"
+        elif matches is False:
+            status = "weekday_mismatch"
+        elif event < today:
+            status = "past"
+        elif event == today:
+            status = "today"
+        else:
+            status = "future_unverified"
         checks.append({"date": event.isoformat(), "weekday_matches": matches, "status": status})
-    statuses = [x["status"] for x in checks]
+    statuses = [item["status"] for item in checks]
     result["event_dates"] = checks
-    if any(x in {"weekday_mismatch", "invalid_calendar_date"} for x in statuses):
-        result.update(schedule_validation="weekday_or_calendar_mismatch",
+    if any(status in {"weekday_mismatch", "invalid_calendar_date", "ambiguous_month"} for status in statuses):
+        result.update(schedule_validation="date_or_weekday_not_validated",
                       availability_status="not_validated",
-                      schedule_warning="Dia da semana divergente ou data inválida; conferir publicação.")
-    elif statuses and all(x == "past" for x in statuses):
+                      schedule_warning="Data ambígua, dia da semana divergente ou data inválida; conferir publicação.")
+    elif statuses and all(status == "past" for status in statuses):
         result.update(schedule_validation="past_date", availability_status="expired",
                       schedule_warning=f"Entrevista passada em relação a {today.isoformat()} (Porto Alegre).")
-    elif statuses and all(x in {"today", "future_unverified"} for x in statuses):
+    elif statuses and all(status in {"today", "future_unverified"} for status in statuses):
         is_today = "today" in statuses
         result.update(schedule_validation="date_consistent",
                       availability_status="today_unverified" if is_today else "future_unverified",
@@ -197,21 +214,27 @@ def extract_interviews(text, title, url, publication_date=None, reference_date=N
             continue
         agency = AGENCY_RE.match(line)
         if agency:
-            current_agency = normalize_agency_name(agency.group(1))
+            agency_raw = clean(agency.group(1))
+            current_agency = {"raw": agency_raw, "normalized": normalize_agency_name(agency_raw)}
             continue
         bullet = BULLET_RE.match(line)
         if bullet and current_agency:
             schedule, quantity, roles = bullet.groups()
             validation = validate_interview_schedule(schedule, publication_date, reference_date)
-            is_current = validation["availability_status"] in {"today_unverified", "future_unverified"}
+            is_current_interview = validation["availability_status"] in {"today_unverified", "future_unverified"}
+            agency_raw = current_agency["raw"]
+            agency_name = current_agency["normalized"]
+            municipality_raw = agency_raw.split(" Zona ")[0]
             results.append({
-                "agency": current_agency,
-                "municipality": normalize_municipality(current_agency.split(" Zona ")[0]),
+                "agency": agency_name, "agency_raw": agency_raw,
+                "municipality": normalize_municipality(municipality_raw),
+                "municipality_raw": municipality_raw,
                 "state": "RS", "schedule_or_date": clean(schedule), **validation,
                 "announced_openings": int(quantity), "positions_description": clean(roles),
                 "report_title": title, "publication_date": publication_date,
                 "source_url": url, "data_kind": "published_interview_opportunity",
-                "is_current_opportunity": is_current,
+                "is_current_unverified_interview": is_current_interview,
+                "is_current_opportunity": False,
                 "application_note": "Confirmar data, horário e disponibilidade diretamente com a agência.",
             })
     return results
@@ -310,14 +333,15 @@ def collect():
     aggregates_unique = {x["source_url"]: x for x in aggregates}
     records = list(unique.values())
     return {
-        "source": "FGTAS/SINE RS - diagnóstico V3.2",
+        "source": "FGTAS/SINE RS - diagnóstico V3.3",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo", "database_written": False,
         "summary": {
             "checked_pages": len(checked),
             "aggregate_reports": len(aggregates_unique),
             "interview_records": len(records),
-            "current_unverified_interviews": sum(x["is_current_opportunity"] for x in records),
+            "current_unverified_interviews": sum(x.get("is_current_unverified_interview", False) for x in records),
+            "current_confirmed_job_opportunities": 0,
             "expired_interviews": sum(x["availability_status"] == "expired" for x in records),
             "not_validated_interviews": sum(x["availability_status"] == "not_validated" for x in records),
         },
@@ -340,12 +364,21 @@ def self_test():
     assert expired["availability_status"] == "expired"
     mismatch = validate_interview_schedule("segunda-feira (17)", "2026-04-17", date(2026, 4, 1))
     assert mismatch["availability_status"] == "not_validated"
+    ambiguous = validate_interview_schedule("quinta-feira (2)", "2026-11-27", date(2026, 11, 27))
+    assert ambiguous["availability_status"] == "not_validated"
+    future_publication = validate_interview_schedule("sexta-feira (28)", "2026-11-28", date(2026, 11, 27))
+    assert future_publication["availability_status"] == "not_validated"
     assert normalize_agency_name("Carlos Barbosa (") == "Carlos Barbosa"
     assert normalize_agency_name("Taquara (") == "Taquara"
+    assert normalize_agency_name("Cachoeira do S") == "Cachoeira do Sul"
     assert normalize_municipality("Cachoeira do S") == "Cachoeira do Sul"
-    assert canonical_page_url("https://www.fgtas.rs.gov.br/noticias/#top") == "https://www.fgtas.rs.gov.br/noticias"
     assert extract_aggregate("Rio Grande do Sul\n5.401 vagas", "Teste", "https://www.fgtas.rs.gov.br/x")
-    print("Autoteste FGTAS/SINE RS V3.2: OK")
+    sample = "Agência FGTAS/Sine Cachoeira do S\n• sexta-feira (17) - 2 vagas - Entrevistas"
+    records = extract_interviews(sample, "Teste", "https://www.fgtas.rs.gov.br/x", "2026-04-17", date(2026, 4, 17))
+    assert records[0]["agency"] == "Cachoeira do Sul"
+    assert records[0]["agency_raw"] == "Cachoeira do S"
+    assert records[0]["is_current_opportunity"] is False
+    print("Autoteste FGTAS/SINE RS V3.3: OK")
 
 
 def main():
