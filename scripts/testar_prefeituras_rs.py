@@ -4,16 +4,16 @@
 import re
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
 
 PREFEITURAS_RS = [
-    ("Caxias do Sul (FGTAS/Balcao)", "https://caxias.rs.gov.br/servicos/desenvolvimento-economico/balcao-de-empregos"),
-    ("Caxias do Sul (Busca)", "https://caxias.rs.gov.br/"),
+    ("Caxias do Sul (Balcao)", "https://caxias.rs.gov.br/servicos/desenvolvimento-economico/balcao-de-empregos"),
+    ("Caxias do Sul (Home)", "https://caxias.rs.gov.br/"),
     ("Novo Hamburgo (Agencia)", "https://www.novohamburgo.rs.gov.br/sedec/agencia-municipal-empregos"),
     ("Bento Goncalves (Balcao)", "https://bentogoncalves.atende.net/cidadao/pagina/balcao-de-empregos"),
     ("Canoas (Banco de Oportunidades)", "https://www.canoas.rs.gov.br/servicos/banco-de-oportunidades/"),
-    ("Pelotas (Balcao/Empregos)", "https://www.pelotas.com.br/"),
+    ("Pelotas (Home)", "https://www.pelotas.com.br/"),
 ]
 
 TERMOS_VAGA = re.compile(
@@ -21,22 +21,23 @@ TERMOS_VAGA = re.compile(
     re.I,
 )
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+}
+
 
 def clean(txt: str) -> str:
     return re.sub(r"\s+", " ", txt or "").strip()
 
 
-def testar_prefeitura(nome: str, url: str) -> None:
-    print(f"\n==========================================")
+def testar_prefeitura(client: httpx.Client, nome: str, url: str) -> None:
+    print("\n==========================================")
     print(f"ALVO: {nome}")
     print(f"URL : {url}")
     try:
-        resp = cffi_requests.get(
-            url,
-            impersonate="chrome",
-            timeout=25,
-            allow_redirects=True,
-        )
+        resp = client.get(url)
         print(f"STATUS: HTTP {resp.status_code} | URL Final: {resp.url} | Tamanho: {len(resp.content)}B")
 
         if resp.status_code != 200:
@@ -63,7 +64,6 @@ def testar_prefeitura(nome: str, url: str) -> None:
                 if urlparse(href).hostname == urlparse(str(resp.url)).hostname:
                     links_relevantes.append((texto or "(link)", href))
 
-        # Verifica se há menção direta a quantidade de vagas no texto da página
         texto_pagina = clean(soup.get_text(" ", strip=True))
         m_vagas = re.findall(r".{0,40}\b\d{1,4}\s+vagas?\b.{0,40}", texto_pagina, re.I)
 
@@ -87,8 +87,9 @@ def testar_prefeitura(nome: str, url: str) -> None:
 
 
 def main() -> None:
-    for nome, url in PREFEITURAS_RS:
-        testar_prefeitura(nome, url)
+    with httpx.Client(headers=HEADERS, timeout=25.0, follow_redirects=True) as client:
+        for nome, url in PREFEITURAS_RS:
+            testar_prefeitura(client, nome, url)
 
 
 if __name__ == "__main__":
