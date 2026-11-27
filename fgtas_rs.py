@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coletor público experimental FGTAS/SINE-RS V3.3. Não acessa banco."""
+"""Coletor público experimental FGTAS/SINE-RS V3.4. Não acessa banco."""
 
 import argparse
 import json
@@ -225,10 +225,13 @@ def extract_interviews(text, title, url, publication_date=None, reference_date=N
             agency_raw = current_agency["raw"]
             agency_name = current_agency["normalized"]
             municipality_raw = agency_raw.split(" Zona ")[0]
+            municipality_name = normalize_municipality(municipality_raw)
             results.append({
                 "agency": agency_name, "agency_raw": agency_raw,
-                "municipality": normalize_municipality(municipality_raw),
+                "agency_normalization_status": "normalized_from_raw" if agency_name != agency_raw else "unchanged",
+                "municipality": municipality_name,
                 "municipality_raw": municipality_raw,
+                "municipality_normalization_status": "normalized_from_raw" if municipality_name != municipality_raw else "unchanged",
                 "state": "RS", "schedule_or_date": clean(schedule), **validation,
                 "announced_openings": int(quantity), "positions_description": clean(roles),
                 "report_title": title, "publication_date": publication_date,
@@ -333,7 +336,7 @@ def collect():
     aggregates_unique = {x["source_url"]: x for x in aggregates}
     records = list(unique.values())
     return {
-        "source": "FGTAS/SINE RS - diagnóstico V3.3",
+        "source": "FGTAS/SINE RS - diagnóstico V3.4",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo", "database_written": False,
         "summary": {
@@ -352,7 +355,8 @@ def collect():
             "Entrevistas não equivalem automaticamente a vagas abertas.",
             "Datas futuras permanecem não verificadas até confirmação com a agência.",
             "Relatórios agregados não são convertidos em vagas individuais.",
-            "Nomes truncados são normalizados apenas quando há correspondência explícita; o texto original não é tratado como confirmação adicional.",
+            "Nomes truncados são normalizados apenas por aliases explícitos; agency_raw e municipality_raw preservam o texto original.",
+            "Entrevistas publicadas são registros históricos de eventos e nunca são convertidas automaticamente em vagas atuais.",
         ],
     }
 
@@ -377,8 +381,12 @@ def self_test():
     records = extract_interviews(sample, "Teste", "https://www.fgtas.rs.gov.br/x", "2026-04-17", date(2026, 4, 17))
     assert records[0]["agency"] == "Cachoeira do Sul"
     assert records[0]["agency_raw"] == "Cachoeira do S"
+    assert records[0]["municipality"] == "Cachoeira do Sul"
+    assert records[0]["agency_normalization_status"] == "normalized_from_raw"
     assert records[0]["is_current_opportunity"] is False
-    print("Autoteste FGTAS/SINE RS V3.3: OK")
+    assert normalize_agency_name("Carlos Barbosa (") == "Carlos Barbosa"
+    assert normalize_agency_name("Taquara (") == "Taquara"
+    print("Autoteste FGTAS/SINE RS V3.4: OK")
 
 
 def main():
