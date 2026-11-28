@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnóstico conservador FGTAS/SINE RS V3.4; não grava em banco."""
+"""Diagnóstico conservador FGTAS/SINE RS V3.5; não grava em banco."""
 
 import argparse
 import io
@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 from zoneinfo import ZoneInfo
@@ -95,6 +95,12 @@ JOB_TERMS = re.compile(
 
 def clean(value):
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def canonical_url(url):
+    """Remove query e fragmento para identificar o mesmo arquivo por URLs variantes."""
+    parsed = urlparse(url)
+    return parsed._replace(query="", fragment="").geturl()
 
 
 def host_allowed(url, original_url):
@@ -187,6 +193,41 @@ def parse_job_records_from_text(full_text, title, url, publication_date=None):
     return records
 
 
+def apply_publication_date_guard(doc, records, reference_date=None):
+    """Marca datas futuras/ausentes e impede que registros sejam tratados como atuais."""
+    today = reference_date or datetime.now(TZ_POA).date()
+    publication_date = doc.get("publication_date")
+    if publication_date:
+        try:
+            parsed_date = date.fromisoformat(publication_date)
+            is_future = parsed_date > today
+            doc["publication_date_status"] = (
+                "future_date_blocked" if is_future else "not_future_date_needs_confirmation"
+            )
+            doc["publication_date_is_future"] = is_future
+        except ValueError:
+            doc["publication_date_status"] = "invalid_date_needs_review"
+            doc["publication_date_is_future"] = None
+    else:
+        doc["publication_date_status"] = "missing_date_needs_review"
+        doc["publication_date_is_future"] = None
+
+    for record in records:
+        record["is_current_opportunity"] = False
+        if doc.get("publication_date_is_future") is True:
+            record["availability_status"] = "future_publication_date_needs_review"
+            record["availability_note"] = (
+                "A data impressa no PDF é posterior à data da coleta; registro bloqueado "
+                "para qualquer classificação como oportunidade atual até revisão da fonte."
+            )
+        elif doc.get("publication_date_is_future") is None:
+            record["availability_status"] = "publication_date_needs_review"
+            record["availability_note"] = (
+                "A data de publicação está ausente ou inválida; disponibilidade atual não pode ser confirmada."
+            )
+    return doc, records
+
+
 def parse_caxias_pdf(pdf_bytes, title, url):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     pages = [(page.extract_text() or "") for page in reader.pages]
@@ -222,6 +263,7 @@ def parse_caxias_pdf(pdf_bytes, title, url):
 
 def extract_pdf_links(soup, page_url):
     found = {}
+    aliases = {}
     for anchor in soup.find_all("a", href=True):
         href = urljoin(page_url, anchor["href"].strip())
         parsed = urlparse(href)
@@ -230,7 +272,9 @@ def extract_pdf_links(soup, page_url):
         if label.casefold() in {"abrir no navegador", "download"}:
             label = "Painel de vagas FGTAS/SINE Caxias do Sul"
         if parsed.scheme == "https" and is_pdf and host_allowed(href, page_url):
-            found[href] = label
+            canonical = canonical_url(href)
+            found.setdefault(canonical, label)
+            aliases.setdefault(canonical, []).append(href)
     for frame in soup.find_all(["iframe", "embed", "object"]):
         href = frame.get("src") or frame.get("data")
         if not href:
@@ -240,8 +284,10 @@ def extract_pdf_links(soup, page_url):
         mime = str(frame.get("type", "")).lower()
         is_pdf = parsed.path.lower().endswith(".pdf") or "application/pdf" in mime
         if parsed.scheme == "https" and is_pdf and host_allowed(absolute, page_url):
-            found.setdefault(absolute, "Documento PDF incorporado")
-    return list(found.items())[:MAX_PDFS_PER_PAGE]
+            canonical = canonical_url(absolute)
+            found.setdefault(canonical, "Documento PDF incorporado")
+            aliases.setdefault(canonical, []).append(absolute)
+    return [(url, label, sorted(set(aliases.get(url, [url])))) for url, label in list(found.items())[:MAX_PDFS_PER_PAGE]]
 
 def inspect_target(client, target):
     urls = [target["url"], *target.get("fallback_urls", [])]
@@ -268,6 +314,7 @@ def inspect_target(client, target):
         "attempted_urls": attempts,
         "status": "not_checked",
         "individual_job_records": [],
+        "duplicate_job_records_removed": 0,
         "candidate_links": [],
         "excluded_placeholder_links": [],
         "documents": [],
@@ -288,15 +335,44 @@ def inspect_target(client, target):
 
     # A página de Caxias publica o painel em PDF. Extrair o documento, não apenas os links HTML.
     if target["municipality"] == "Caxias do Sul":
-        for pdf_url, pdf_title in extract_pdf_links(soup, str(response.url)):
+        seen_job_codes = set()
+        for pdf_url, pdf_title, url_aliases in extract_pdf_links(soup, str(response.url)):
             try:
+                # A URL com ?download=... e a URL sem query podem apontar para o mesmo PDF.
                 pdf_bytes = fetch_pdf(client, pdf_url, str(response.url))
                 doc, pdf_records = parse_caxias_pdf(pdf_bytes, pdf_title, pdf_url)
+                doc["canonical_url"] = pdf_url
+                doc["url_aliases"] = url_aliases
+                doc["duplicate_url_variants_collapsed"] = max(0, len(url_aliases) - 1)
+                # Registros com data futura/ausente continuam visíveis para auditoria, mas bloqueados.
+                doc, pdf_records = apply_publication_date_guard(doc, pdf_records)
+                for record in pdf_records:
+                    code = record.get("source_id")
+                    if code in seen_job_codes:
+                        item["duplicate_job_records_removed"] += 1
+                        continue
+                    seen_job_codes.add(code)
+                    item["individual_job_records"].append(record)
+
+                doc["parsed_individual_records"] = len(pdf_records)
+                doc["unique_job_codes_kept"] = len({r.get("source_id") for r in pdf_records})
+                declared = doc.get("declared_vacancy_total")
+                parsed_count = doc["unique_job_codes_kept"]
+                doc["declared_vs_parsed_difference"] = (
+                    declared - parsed_count if declared is not None else None
+                )
+                doc["declared_total_matches_parsed_records"] = (
+                    declared == parsed_count if declared is not None else None
+                )
+                if declared is not None and declared != parsed_count:
+                    doc["count_reconciliation_status"] = "declared_total_differs_from_extracted_unique_records"
+                else:
+                    doc["count_reconciliation_status"] = "no_declared_total_or_counts_match"
                 item["documents"].append(doc)
-                item["individual_job_records"].extend(pdf_records)
             except Exception as exc:
                 item["documents"].append({
                     "title": pdf_title[:180], "url": pdf_url,
+                    "canonical_url": pdf_url, "url_aliases": url_aliases,
                     "download_status": "error",
                     "error": f"{type(exc).__name__}: {exc}",
                 })
@@ -357,7 +433,7 @@ def collect_all(pause=1.0):
                 time.sleep(max(0.0, pause))
 
     return {
-        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.4",
+        "source": "Diagnóstico municipal FGTAS/SINE RS - versão 3.5",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo",
         "database_written": False,
@@ -372,6 +448,23 @@ def collect_all(pause=1.0):
             "excluded_placeholder_links": sum(len(x["excluded_placeholder_links"]) for x in results),
             "confirmed_job_boards": sum(bool(x["is_confirmed_job_board"]) for x in results),
             "individual_job_records": sum(len(x["individual_job_records"]) for x in results),
+            "unique_individual_job_records": sum(len({r.get("source_id") for r in x["individual_job_records"]}) for x in results),
+            "duplicate_job_records_removed": sum(x.get("duplicate_job_records_removed", 0) for x in results),
+            "duplicate_pdf_url_variants_collapsed": sum(
+                d.get("duplicate_url_variants_collapsed", 0) for x in results for d in x["documents"]
+            ),
+            "future_dated_documents_blocked": sum(1 for x in results for d in x["documents"] if d.get("publication_date_is_future") is True),
+            "documents_with_declared_vs_parsed_mismatch": sum(
+                1 for x in results for d in x["documents"]
+                if d.get("count_reconciliation_status") == "declared_total_differs_from_extracted_unique_records"
+            ),
+            "declared_vacancy_total": sum(
+                d.get("declared_vacancy_total", 0) or 0 for x in results for d in x["documents"]
+            ),
+            "declared_minus_unique_extracted": sum(
+                (d.get("declared_vacancy_total", 0) or 0) - d.get("unique_job_codes_kept", 0)
+                for x in results for d in x["documents"]
+            ),
             "pdf_documents_found": sum(len(x["documents"]) for x in results),
             "pdf_documents_extracted": sum(1 for x in results for d in x["documents"] if d.get("extraction_status") in {"text_extracted_no_individual_records", "individual_records_extracted_needing_confirmation"}),
             "pdf_documents_with_individual_records": sum(1 for x in results for d in x["documents"] if d.get("parsed_individual_records", 0) > 0),
@@ -381,7 +474,9 @@ def collect_all(pause=1.0):
         "rule": (
             "Portais, serviços e plataformas são classificados separadamente. "
             "Links com indicação de teste/homologação são excluídos; demais links seguem "
-            "como candidatos para revisão manual. PDFs oficiais de Caxias podem ser extraídos; códigos individuais são deduplicados e permanecem marcados para confirmação. Totais agregados nunca são convertidos em registros."
+            "como candidatos para revisão manual. PDFs oficiais de Caxias são deduplicados por URL canônica "
+            "e códigos de vaga únicos; totais declarados são comparados com os códigos extraídos. Datas futuras "
+            "são bloqueadas para classificação como oportunidade atual. Totais agregados nunca são convertidos em registros."
         ),
     }
 
