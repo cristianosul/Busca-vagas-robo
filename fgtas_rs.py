@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coletor público experimental FGTAS/SINE-RS V3.4. Não acessa banco."""
+"""Coletor público experimental FGTAS/SINE-RS V3.5. Não acessa banco."""
 
 import argparse
 import json
@@ -336,7 +336,7 @@ def collect():
     aggregates_unique = {x["source_url"]: x for x in aggregates}
     records = list(unique.values())
     return {
-        "source": "FGTAS/SINE RS - diagnóstico V3.4",
+        "source": "FGTAS/SINE RS - diagnóstico V3.5",
         "generated_at_poa": datetime.now(TZ_POA).isoformat(),
         "timezone": "America/Sao_Paulo", "database_written": False,
         "summary": {
@@ -386,7 +386,7 @@ def self_test():
     assert records[0]["is_current_opportunity"] is False
     assert normalize_agency_name("Carlos Barbosa (") == "Carlos Barbosa"
     assert normalize_agency_name("Taquara (") == "Taquara"
-    print("Autoteste FGTAS/SINE RS V3.4: OK")
+    print("Autoteste FGTAS/SINE RS V3.5: OK")
 
 
 def main():
